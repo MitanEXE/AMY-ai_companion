@@ -1,0 +1,161 @@
+AMY COMMAND REFERENCE
+=====================
+
+START AMY (run these in your Linux terminals)
+
+Terminal A — start the local Ollama server and leave the terminal open:
+
+OLLAMA_NO_CLOUD=1 OLLAMA_HOST=127.0.0.1:11435 \
+OLLAMA_CONTEXT_LENGTH=4096 OLLAMA_VULKAN=0 \
+OLLAMA_MODELS="$HOME/.local/share/jarvis-models" ollama serve
+
+Terminal B — start AMY:
+
+python "$HOME/.local/share/mitan-jarvis/amy.py"
+
+EVERYDAY COMMANDS (type these at AMY's You > prompt)
+
+/help                     Show available commands.
+/quit                     Exit AMY.
+/think                    Give the next model question extra thinking time.
+/fast                     Cancel extra thinking and use fast mode.
+/rules                    Show AMY's four operating rules.
+/profile                  Show your saved profile and its source.
+
+VOICE, LANGUAGE AND TIME
+
+/voice                    Start voice chat. Speak, then pause for a reply.
+/voice on                 Also starts voice chat.
+/voice off                Stop voice chat and return to typing.
+/text                     Also returns to typing.
+/language                 Show the current reply and microphone language.
+/language en              Save English for replies and microphone input.
+/language zh              Use Mandarin input and Traditional Chinese replies.
+/timezone                 Show the timezone AMY uses for time and date.
+/timezone Asia/Taipei     Set AMY's timezone to Taiwan time.
+
+Ask normally for local tasks. Examples:
+  What time is it?
+  What is 12 * 8?
+  Switch to workspace 3
+The workspace command asks for approval before switching Hyprland workspaces.
+
+SCREENS AND SCREENSHOT SAVING
+
+/screens                   List display numbers and connector names.
+/screen [N] [QUESTION]     Check one screen. General questions use a smaller image.
+/screen detail [N] [ASK]   Use a larger image for small text or fine details.
+/screen text [N]           Show recognized text without running a chat model.
+/screenshot [N]            Save a new PNG after approval to ~/AMY/screenshots/.
+
+Examples you can say or type:
+  Can you check my screen, what does this text mean?
+  On screen 1, explain this error.
+  Save a screenshot of screen 1.
+
+Screen checks and OCR run locally. Saving uses the regular screenshot size.
+Fast text recognition is optional. On Arch, run:
+  sudo pacman -S --needed tesseract tesseract-data-eng
+For Traditional Chinese, also install tesseract-data-chi_tra.
+With Tesseract available, AMY tries reading the visible text before asking
+the local chat model to explain an error or message. The terminal shows
+screen timings to help distinguish capture, OCR, model load and reply time.
+
+PROJECT FILES AND LARAVEL
+
+/projects                  List project folders in ~/Projects/.
+/project NAME              Select a project for this AMY session.
+/project                   Show the working folder.
+/project off               Use the top level of ~/Projects/.
+/where [NAME|.EXT]         Check the location of a saved project file.
+/laravel NAME              Create a Laravel 13 project after approval.
+/file PATH REQUEST         Propose creating or editing one text file.
+/edit REQUEST              Propose a small change in the selected project.
+
+Examples:
+  Create a Laravel project called inventory-app.
+  Create me an HTML file that can surprise me.
+  Update routes/web.php to add a /hello route that says Hello.
+  /file README.md Add a short section explaining the hello route.
+
+For an unnamed text or code file, AMY proposes a name inside the selected
+project or ~/Projects/. It shows the full draft before asking for approval.
+If a chat reply hits its token limit, AMY reports it. Incomplete file drafts
+stop before the approval prompt.
+
+AMY prints the full path after a successful save. Ask “Where did you save
+surprise.html?” or type /where .html to check the save report and the file.
+
+An approved Laravel project becomes the selected project. Laravel needs PHP 8.3+
+and Composer. Composer downloads the PHP dependencies with plugins and scripts
+disabled. AMY previews edits, verifies the written files, and saves the full
+change report in ~/AMY/dump/. Voice requests use the same terminal approval.
+
+WEB SEARCH
+
+/web                      Show web-search status and limits.
+/web on                   Enable online lookup for this session.
+/web off                  Disable online lookup for this session.
+/search QUESTION          Look up a question using approved sources.
+/search-key               Configure an optional Brave Search API key.
+/search-key remove        Remove the saved search API key after approval.
+
+Replace QUESTION with your actual question. For example:
+  /search What is the weather in Hsinchu, Taiwan?
+
+When AMY offers an online check, say or type "Yes, check" to look up
+the original question, or "No" to move on. The offer expires after
+three minutes or when you change topics. You can also say "go online"
+or "go offline" to change the web setting.
+
+MEMORY
+
+/remember NOTE            Save a note after approval.
+/memories                 Show saved notes and their numbers.
+/forget NUMBER            Review and remove a numbered note after approval.
+/forget all               Review and remove all saved notes after approval.
+
+Example: /remember I prefer short explanations.
+Use /memories to find the number before running /forget 2.
+AMY backs up the note file when you approve removal.
+
+TRAINING (requires the installed AMY Training Starter package)
+
+/train                    Show training commands.
+/train check              Check hardware, available RAM and storage.
+/train setup              Prepare the CPU training environment and model.
+/train setup cpu          Explicitly select CPU setup.
+/train setup xpu          Try Intel GPU setup with your existing driver.
+/train status             Show the training folder and active model selection.
+/train init               Review and approve the starter examples.
+/teach                    Enter a question and its ideal answer.
+/train pilot              Run two real training steps to check resources.
+/train run                Train a separate candidate after a successful pilot.
+/train review             Compare base and candidate results.
+/train use                Approve trying the trained candidate in chat.
+/train base               Return to the original Ollama model after approval.
+
+Fresh training setups use ~/AMY/train/. Existing setups keep their original folder.
+
+First run, one command at a time:
+  /train check → /train setup → /train init → /teach (optional)
+  → /train pilot → /train run → /train review
+Read the review before choosing /train use. /teach saves an example
+for the next training run. Use /remember for a note you want saved now.
+
+INSTALLER AND VOICE MAINTENANCE (Linux terminal)
+
+From inside the AMY project folder:
+  python amy_training.py install
+
+For the installed AMY application:
+  python "$HOME/.local/share/mitan-jarvis/amy.py" --setup
+    Set up or refresh the voice and web environment. Setup defaults to English.
+  python "$HOME/.local/share/mitan-jarvis/amy.py" --voice-test
+    Generate and play a sample from both Kokoro voices.
+  python "$HOME/.local/share/mitan-jarvis/amy.py" --remove-piper
+    Test Kokoro, then offer to remove the old Piper voices.
+
+When AMY asks for approval, read the proposed action first.
+yes, y or Enter approves. no or n cancels. Capital letters work too.
+An optional online check uses a spoken or typed reply such as "Yes, check".

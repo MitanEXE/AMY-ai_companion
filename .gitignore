@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.bak
+*.log
+.env
+.env.*
+!.env.example
+
+# Local AMY data and generated output
+profile.json
+settings.json
+memory.txt
+brave-search.key
+training-install.json
+/AMY/
+/Projects/
+/training/
+/train/
+/screenshots/
+/dump/
+
+# Models, recordings and generated bundles
+*.safetensors
+*.gguf
+*.pth
+*.pt
+*.onnx
+ggml-*.bin
+*.wav
+AMY_Training_Starter*.zip
