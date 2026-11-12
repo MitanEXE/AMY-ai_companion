@@ -21,9 +21,9 @@ def desktop_entry(interpreter, script, port):
         return '"' + value + '"'
 
     return (
-        "[Desktop Entry]\nType=Application\nName=AMY\nComment=Local AI companion\n"
+        "[Desktop Entry]\nType=Application\nName=AMY Companion\nComment=Local AI companion\n"
         f"Exec={quote(interpreter)} {quote(script)} --port {port}\n"
-        "Icon=applications-utilities\nTerminal=false\nCategories=Utility;\n"
+        "Terminal=false\nCategories=Utility;\n"
     )
 
 
@@ -54,6 +54,7 @@ def main():
     print(f"Install Qt into {environment}.")
     print(f"Create or update the AMY app launcher at {launcher}.")
     print(f"The launcher runs AMY from {source}. Keep this folder after installation.")
+    print("Prepare ~/AMY/important-temp and ~/AMY/dump/temp for project indexes and temporary files.")
     print("The Qt install may download packages. Ollama models and voice files are installed separately.")
     try:
         approve = input("Install? [Y/n] (Enter = yes): ").strip().casefold()
@@ -71,8 +72,14 @@ def main():
     subprocess.run([uv, "pip", "install", "--python", str(interpreter), "-r", str(source / "requirements-desktop.txt")],
                    check=True, env=variables)
     subprocess.run([str(interpreter), "-c",
-                    "from PySide6.QtWidgets import QApplication; assert QApplication([]).platformName() == 'offscreen'"],
+                    "import pypdf; from PySide6.QtWidgets import QApplication; "
+                    "assert QApplication([]).platformName() == 'offscreen'"],
                    check=True, env={**variables, "QT_QPA_PLATFORM": "offscreen"})
+    from mitan_jarvis import home_directory
+
+    for parts in (("AMY", "important-temp"), ("AMY", "dump", "temp")):
+        with home_directory(parts, created=[]):
+            pass
     launcher.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", dir=launcher.parent, prefix=".amy-", suffix=".desktop",
                                      encoding="utf-8", delete=False) as stream:
@@ -87,7 +94,7 @@ def main():
         temporary.unlink(missing_ok=True)
     if launcher.read_text(encoding="utf-8") != entry:
         raise RuntimeError("Could not verify the installed launcher.")
-    print("Installed and verified. Open AMY from your app launcher.")
+    print("Installed and verified. Open AMY Companion from your app launcher.")
     return 0
 
 

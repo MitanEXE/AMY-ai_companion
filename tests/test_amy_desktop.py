@@ -17,16 +17,23 @@ from unittest.mock import patch
 HAS_QT = sys.platform == "linux" and find_spec("PySide6") is not None
 if HAS_QT:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import QPoint, QTimer, Qt
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QTimer, Qt
     from PySide6.QtGui import QImage
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QCheckBox, QDialogButtonBox
+    from PySide6.QtWidgets import QApplication, QCheckBox, QDialogButtonBox, QPushButton
 
     import amy_desktop as app
     import amy_desktop_core as desktop
+    import amy_desktop_files as files
+    from amy_desktop_sessions import ChatStore, CHOICE_TAG
     import mitan_jarvis as amy
 
 HTML = "<!doctype html>\n<html><body><button>Surprise</button></body></html>\n"
+OPTIONS = [
+    {"title": "Email and password", "reason": "Users keep local accounts. Plan for password resets."},
+    {"title": "Email sign-in link", "reason": "Users sign in with a link. Requires email delivery."},
+    {"title": "Google sign-in", "reason": "Uses an existing Google account. Requires provider setup."},
+]
 
 
 class OllamaFixture(BaseHTTPRequestHandler):
@@ -41,32 +48,57 @@ class OllamaFixture(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        self.server.metadata.append(self.path)
         if self.path == "/api/version":
             self.send_data({"version": "fixture"})
         elif self.path == "/api/tags":
             self.send_data({"models": self.server.models})
+        elif self.path == "/models/checkpoints":
+            self.send_data(["fixture.safetensors", "legacy.ckpt"])
+        elif self.path == "/history/amy-image-test":
+            self.send_data({"amy-image-test": {"outputs": {"7": {"images": [
+                {"filename": "fixture.png", "subfolder": "", "type": "temp"},
+            ]}}}})
+        elif self.path.startswith("/view?"):
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(self.server.image)))
+            self.end_headers()
+            self.wfile.write(self.server.image)
         else:
             self.send_error(404)
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/api/show":
+            self.server.metadata.append(self.path)
             self.send_data({"capabilities": ["completion", "vision"]})
+            return
+        if self.path == "/prompt":
+            self.server.image_prompts.append(request)
+            self.send_data({"prompt_id": "amy-image-test"})
             return
         if self.path != "/api/chat":
             self.send_error(404)
             return
         self.server.requests.append(request)
-        if request.get("format"):
+        schema = request.get("format") or {}
+        if "options" in schema.get("properties", {}):
+            content = json.dumps({"message": "Choose an approach.", "options": self.server.options})
+            self.send_data({"message": {"content": content}, "done": True})
+            return
+        if schema:
             proposal = json.loads(request["messages"][-1]["content"])
             plan = {"files": [{"path": proposal["target"], "edits": [{"before": "", "after": HTML}]}]}
-            content = json.dumps(plan)
+            content = json.dumps(self.server.draft or plan)
         else:
-            content = "A local reply."
+            content = self.server.answer
         events = [
             {"message": {"content": content[: len(content) // 2]}, "done": False},
             {"message": {"content": content[len(content) // 2 :]}, "done": False},
-            {"message": {"content": ""}, "done": True, "done_reason": self.server.finish_reason},
+            {"message": {"content": ""}, "done": True, "done_reason": self.server.finish_reason,
+             "load_duration": 50_000_000, "prompt_eval_duration": 20_000_000,
+             "eval_duration": 1_000_000_000, "eval_count": 20},
         ]
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
@@ -98,9 +130,15 @@ class DesktopTests(unittest.TestCase):
                                           SETTINGS=self.data / "settings.json", PROFILE=self.data / "profile.json"))
         self.server = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), OllamaFixture))
         self.server.requests = []
+        self.server.metadata = []
+        self.server.options = OPTIONS
+        self.server.draft = None
+        self.server.answer = "A local reply."
+        self.server.image_prompts = []
+        self.server.image = self.image_bytes(0xFF8844CC)
         self.server.models = [
-            {"name": "lfm3:1.7b"},
-            {"name": "someuser/custom:latest", "capabilities": ["completion", "vision"]},
+            {"name": "lfm3:1.7b", "digest": "a" * 64},
+            {"name": "someuser/custom:latest", "digest": "b" * 64, "capabilities": ["completion", "vision"]},
             {"name": "remote:cloud"},
             {"name": "remote:alias", "remote_host": "example.com"},
             {"name": "embeddings:latest", "capabilities": ["embedding"]},
@@ -129,6 +167,16 @@ class DesktopTests(unittest.TestCase):
     def send(self, question):
         self.window.composer.setPlainText(question)
         QTest.keyClick(self.window.composer, Qt.Key.Key_Return)
+
+    @staticmethod
+    def image_bytes(color):
+        image = QImage(40, 24, QImage.Format.Format_RGB32)
+        image.fill(color)
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        return bytes(data)
 
     def test_discover_select_and_persist_settings(self):
         self.window.open_models()
@@ -304,23 +352,209 @@ class DesktopTests(unittest.TestCase):
             ocr.assert_called_once_with(b"same frame", ("tesseract", "eng"))
 
     def test_live_translation_is_reused_after_visual_only_change(self):
-        self.window.save_settings(replace(self.window.preferences, chinese=True))
+        self.window.scan.set_languages({"eng": "English", "jpn": "Japanese"})
+        self.window.scan_languages_checked = True
         self.window.scan_region = "0,0 200x100"
         self.window.scan.enable_area(True)
-        self.window.scan.direction.setCurrentIndex(1)
+        self.window.scan.source.setCurrentIndex(self.window.scan.source.findData("jpn"))
+        self.window.scan.target.setCurrentIndex(self.window.scan.target.findData("Indonesian"))
         self.window.open_scan()
         self.window.scan_live = True
-        first = desktop.ScanFrame(b"first", "Hello.")
-        second = desktop.ScanFrame(b"second", "Hello.")
-        with patch.object(desktop, "scan_frame", side_effect=[first, second]):
+        first = desktop.ScanFrame(b"first", "Hello.", self.image_bytes(0xFF234567))
+        second = desktop.ScanFrame(b"second", "Hello.", self.image_bytes(0xFF856798))
+        frames = iter((first, second))
+
+        def frame(*_, on_image):
+            current = next(frames)
+            on_image(current.image)
+            return current
+
+        self.server.stall = True
+        with patch.object(desktop, "scan_frame", side_effect=frame):
             self.window.scan_tick()
-            self.wait_for(lambda: self.window.job is None)
+            self.wait_for(lambda: len(self.server.requests) == 1)
+            self.assertIsNotNone(self.window.job)
             self.window.scan_tick()
+            self.wait_for(lambda: self.window.capture_token is None and self.window.scan_frame == second)
+            self.assertIsNotNone(self.window.job)
+            self.server.release.set()
             self.wait_for(lambda: self.window.job is None)
         self.assertEqual(self.window.scan_frame, second)
         self.assertEqual(len(self.server.requests), 1)
-        self.assertIn("Text unchanged", self.window.scan.status.text())
+        self.assertEqual(self.window.scan.preview_image.toImage().pixel(0, 0), 0xFF856798)
+        self.assertIn("Indonesian", self.server.requests[0]["messages"][0]["content"])
+        self.assertIn("Translated to Indonesian", self.window.scan.status.text())
         self.window.scan.close()
+
+    def test_saved_chats_keep_attachments_and_context_separate(self):
+        original = self.window.normal_chat
+        document = self.home / "meeting-notes.md"
+        document.write_text("Notes\nThe workshop starts in April.\n")
+        self.window.add_attachments([str(document)])
+        self.assertEqual(len(self.window.queued_attachments), 1)
+        self.send("Summarize the notes")
+        self.wait_for(lambda: self.window.job is None)
+        content = self.server.requests[-1]["messages"][-1]["content"]
+        self.assertIn("meeting-notes.md", content)
+        self.assertIn("lines 1", content)
+        self.assertIn("April", content)
+        self.send("When does it start?")
+        self.wait_for(lambda: self.window.job is None)
+        self.assertIn("April", self.server.requests[-1]["messages"][-1]["content"])
+        self.window.new_chat()
+        self.send("Explain why rain falls.")
+        self.wait_for(lambda: self.window.job is None)
+        self.assertNotIn("April", json.dumps(self.server.requests[-1]))
+        self.assertNotIn("meeting-notes.md", self.window.transcript.toPlainText())
+        saved = ChatStore()
+        saved.load()
+        self.assertEqual(len(saved.chats), 2)
+        self.assertEqual(saved.chats[original.id].title, "Summarize the notes")
+        self.assertIn("meeting-notes.md", str(saved.chats[original.id].recent_attachments()))
+        self.assertEqual(saved.active, self.window.normal_chat.id)
+        self.assertEqual(self.server.metadata.count("/api/show"), 1)
+        self.assertEqual(self.window.reply_timing["tokens/s"], 20.0)
+
+    def test_images_and_pdf_are_read_locally(self):
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+        pdf = self.home / "notes.pdf"
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=260, height=180)
+        font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+                                 NameObject("/BaseFont"): NameObject("/Helvetica")})
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+        })
+        content = DecodedStreamObject()
+        content.set_data(b"BT /F1 12 Tf 20 90 Td (AMY PDF note) Tj ET")
+        page[NameObject("/Contents")] = writer._add_object(content)
+        writer.write(pdf)
+        photo = self.home / "photo.png"
+        photo.write_bytes(self.image_bytes(0xFF224466))
+        self.window.add_attachments([str(pdf), str(photo)])
+        self.send("Read these attachments")
+        self.wait_for(lambda: self.window.job is None)
+        request = self.server.requests[-1]["messages"][-1]
+        self.assertIn("notes.pdf", request["content"])
+        self.assertIn("page 1", request["content"])
+        self.assertIn("AMY PDF note", request["content"])
+        self.assertEqual(len(request["images"]), 1)
+        self.assertGreater(len(request["images"][0]), 30)
+        self.assertTrue((self.home / "AMY/dump/temp").is_dir())
+
+    def test_choice_cards_allow_a_followup_without_submitting(self):
+        self.server.answer = "There are two ways.\n" + CHOICE_TAG + json.dumps(OPTIONS[:2])
+        self.send("Give me two choices.")
+        self.wait_for(lambda: self.window.choice_card is not None)
+        card = self.window.choice_card
+        self.assertEqual(len(card.group.buttons()), 2)
+        self.assertFalse(card.submit.isEnabled())
+        self.assertNotIn(CHOICE_TAG, self.window.transcript.toPlainText())
+        self.assertTrue(self.window.composer.isEnabled())
+        self.server.answer = "Let's look at the existing table."
+        self.send("Can we use the existing users table?")
+        self.wait_for(lambda: self.window.job is None)
+        self.assertIsNone(self.window.choice_card)
+        self.assertIn("existing table", self.window.transcript.toPlainText())
+        self.assertFalse(any(control.isEnabled() for control in card.group.buttons()))
+
+    def test_coding_requires_choices_and_checks_the_authorized_folder(self):
+        project = self.home / "Work" / "project"
+        project.mkdir(parents=True)
+        source = project / "app.py"
+        source.write_text("print('old')\n")
+        outside = project.parent / "private.txt"
+        outside.write_text("outside the project")
+        (project / "outside.txt").symlink_to(outside)
+        self.window.authorize_workspace(project)
+        self.server.options = OPTIONS[:2]
+        self.send("Add authentication")
+        self.wait_for(lambda: self.window.job is None)
+        self.assertIsNone(self.window.choice_card)
+        self.assertIn("complete set of coding options", self.window.transcript.toPlainText())
+        self.server.options = OPTIONS
+        self.send("Add authentication")
+        self.wait_for(lambda: self.window.choice_card is not None)
+        card = self.window.choice_card
+        self.assertEqual(len(card.group.buttons()), 3)
+        self.assertEqual(source.read_text(), "print('old')\n")
+        self.assertNotIn("outside.txt", self.window.workspace.files)
+        self.server.options = []
+        self.send("Can we use the existing users table?")
+        self.wait_for(lambda: self.window.job is None)
+        self.assertIsNone(self.window.choice_card)
+        self.assertFalse(any(control.isEnabled() for control in card.group.buttons()))
+        self.assertEqual(source.read_text(), "print('old')\n")
+        self.server.options = OPTIONS
+        self.send("Add authentication using the existing users table")
+        self.wait_for(lambda: self.window.choice_card is not None)
+        card = self.window.choice_card
+        self.server.draft = {"files": [{"path": "app.py", "edits": [
+            {"before": "print('old')", "after": "print('reviewed')"},
+        ]}]}
+        with patch.object(app.DraftDialog, "exec", return_value=1):
+            card.group.button(0).setChecked(True)
+            card.submit.click()
+            self.wait_for(lambda: self.window.job is None)
+        self.assertEqual(source.read_text(), "print('reviewed')\n")
+        self.assertEqual(outside.read_text(), "outside the project")
+        self.assertTrue(self.window.last_report.is_file())
+        restored = files.Workspace.authorize(project)
+        restored.load_index()
+        self.assertIn("Email and password", restored.edits[0])
+
+    def test_workspace_cache_checks_external_changes_and_reuses_unchanged_text(self):
+        project = self.home / "other-project"
+        project.mkdir()
+        source = project / "main.py"
+        source.write_text("value = 1\n")
+        workspace = files.Workspace.authorize(project)
+        token = desktop.Cancellation()
+        with patch.object(amy, "project_snapshot", wraps=amy.project_snapshot) as read:
+            workspace.refresh(token)
+            self.assertEqual(workspace.relevant("Check main.py", token)[0][("main.py",)][0], b"value = 1\n")
+            workspace.refresh(token)
+            workspace.relevant("Check main.py", token)
+            self.assertEqual(read.call_count, 1)
+            source.write_text("value = 22\n")
+            workspace.refresh(token)
+            self.assertEqual(workspace.relevant("Check main.py", token)[0][("main.py",)][0], b"value = 22\n")
+            self.assertEqual(read.call_count, 2)
+
+    def test_short_simple_listed_style_is_sent_with_think_disabled(self):
+        style = "Short, Simple, and Listed"
+        self.window.save_settings(replace(self.window.preferences, style=style))
+        self.send("Explain Python lists.")
+        self.wait_for(lambda: self.window.job is None)
+        request = self.server.requests[-1]
+        self.assertFalse(request["think"])
+        self.assertIn("use bullets (•) for key points", request["messages"][0]["content"])
+        self.assertIn("short paragraphs", request["messages"][0]["content"])
+        self.assertEqual(desktop.load_preferences().style, style)
+
+    def test_generated_images_display_and_save_with_approval(self):
+        self.window.image_generator = app.ComfyUI(self.server.server_port)
+        with patch.object(app.QInputDialog, "getItem", return_value=("fixture.safetensors", True)):
+            self.window.begin_image_generation("A violet mountain")
+            self.wait_for(lambda: bool(self.window.generated_images))
+        workflow = self.server.image_prompts[0]["prompt"]
+        self.assertEqual(workflow["2"]["inputs"]["text"], "A violet mountain")
+        self.assertEqual(workflow["7"]["class_type"], "PreviewImage")
+        self.assertEqual(self.server.requests, [])
+        control, = [item for item in self.window.transcript.findChildren(QPushButton) if item.text() == "Save image"]
+        with patch.object(self.window, "confirm", return_value=False):
+            control.click()
+        self.assertFalse(list((self.home / "AMY/dump").glob("*.png")))
+        with patch.object(self.window, "confirm", return_value=True):
+            control.click()
+        saved, = list((self.home / "AMY/dump").glob("*.png"))
+        self.assertFalse(QImage(str(saved)).isNull())
+        self.assertEqual(control.text(), "Image saved")
+        chat = ChatStore()
+        chat.load()
+        self.assertEqual(chat.chats[chat.active].messages[-1]["image_file"]["path"], str(saved))
 
     def test_search_preview_and_opt_in_automatic_search(self):
         evidence = {"direct_answers": {"en": "It is 20 degrees in Taipei."}, "sources": [{

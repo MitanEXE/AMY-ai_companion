@@ -1,4 +1,4 @@
-# AMY for Linux
+# AMY Companion for Linux
 
 Open AMY from your app launcher for chat, voice, file review and screen tools. AMY uses your local Ollama models. The installer creates a Qt environment and a launcher in your home folder. Your existing terminal setup and AMY data are available from the same home folder.
 
@@ -17,7 +17,7 @@ Open AMY from your app launcher for chat, voice, file review and screen tools. A
    python install_amy_desktop.py
    ```
 
-4. Find **AMY** in your app launcher and open it. If the launcher hasn't refreshed, run the app directly once.
+4. Find **AMY Companion** in your app launcher and open it. If the launcher hasn't refreshed, run the app directly once.
 
    ```bash
    "$HOME/.local/share/mitan-jarvis/desktop-env/bin/python" amy_desktop.py
@@ -26,6 +26,8 @@ Open AMY from your app launcher for chat, voice, file review and screen tools. A
 AMY defaults to `127.0.0.1:11435`, the port used by the original AMY setup. It connects to a running Ollama there. If the port is free, AMY starts its own local Ollama with cloud features disabled. It uses `~/.local/share/jarvis-models` if that folder exists. AMY shuts down the server it started when it closes.
 
 If your downloaded models are on Ollama's standard service at port `11434`, run `python install_amy_desktop.py --port 11434` in the AMY folder. You can also pass `--port 11434` to `amy_desktop.py` when launching directly.
+
+To update from an older ZIP, close AMY, extract the new release into a folder you intend to keep, and rerun the installer there. This updates the launcher and installs PDF support. The desktop uses the same settings and local Ollama models.
 
 ## Choose your model
 
@@ -56,9 +58,41 @@ You can specify a name, for example `/file surprise.html Create a small interact
 
 ## Set up the way AMY replies
 
-In **Settings → General**, choose **Balanced**, **Concise**, or **Detailed**. Add a custom preference, such as “Use simple words and call me sir occasionally.” You can also choose the theme, installed font family, font size, and whether to speak replies or offer web lookups. Click **Save settings**.
+In **Settings → General**, choose **Balanced**, **Concise**, **Detailed**, or **Short, Simple, and Listed**. The last preset uses bullets for key points, numbered lists for steps, and short paragraphs for explanations. You can also add a custom preference, choose the theme, change the installed font and font size, and set voice and web preferences. Click **Save settings**.
 
-**English only** is the default. Choose **English + Traditional Chinese** to enable Chinese replies, Mandarin microphone input and the English/Traditional Chinese screen translation choices. Choose the active reply and microphone language on the same page. Ollama text chat uses your selected model for either language.
+**English only** is the default for chat and voice. Choose **English + Traditional Chinese** to enable Chinese replies and Mandarin microphone input. Screen tools have their own language choices.
+
+After a local model reply, click **Reply timing** to see the time to first text, model loading, prompt processing, and generation speed. **Think** off sends a fast-mode request. A cold model load or a long prompt can still take time. AMY keeps model metadata briefly and reuses the current model for nearby replies.
+
+## Chats and attachments
+
+- Use **New chat** to start a separate conversation. Select past chats in the sidebar. Right-click a chat to delete it after confirmation.
+- Click **Attach** or drop a file onto the message box. Click a file chip to preview it and use **×** to remove it before sending. You can send up to four files with a question.
+- AMY reads UTF-8 text, Markdown, code, logs, CSV, JSON, and PDFs with selectable text. It can read images through a vision model or use an installed Tesseract language for visible text. For a scanned PDF, attach an image of the relevant page for OCR.
+- Attachment excerpts include filenames and page or line numbers. Follow-ups can refer to the most recent attachments in that chat. AMY keeps the original file references locally and asks you to reattach a file if it changed or moved.
+- If AMY offers a choice card, select a choice and click **Submit choice**. You can send a follow-up in the message box while the card is open.
+
+## Create images locally
+
+For text-to-image, start a local [ComfyUI server](https://docs.comfy.org/installation/manual_install) on `127.0.0.1:8188`. Put a compatible single-file Stable Diffusion checkpoint in its `models/checkpoints/` folder.
+
+1. In a chat, type an image description and click **Create image**, or send `/image your description`.
+2. Choose a locally installed `.safetensors` checkpoint. AMY requests one 512 × 512 preview and displays it in the chat.
+3. Click **Save image** and confirm to keep the PNG in `~/AMY/dump/`. Open **Saved media** to find it later. Unsaved previews are kept for the current session.
+
+ComfyUI handles the render on your device. When you stop waiting in AMY, a render already running may finish in ComfyUI. Ollama continues to handle chat and image understanding.
+
+## Work on a coding project
+
+1. Open **Coding**, then click **Choose folder**. AMY can inspect regular files inside the selected folder for that session. Use **Files** to see the index or **Revoke access** to close it.
+2. Ask for a code change. AMY offers at least three distinct approaches and explains when each fits. Select one and click **Submit choice**, or keep chatting in the message box.
+3. Review the diff for the selected approach. **Approve and save** applies the displayed changes and verifies them on disk. AMY saves a change report in `~/AMY/dump/`.
+4. Select the same project folder to pick up its earlier discussion. AMY checks file metadata, reuses unchanged source excerpts during the session, and reads files relevant to the next request.
+
+| Local folder | Contents |
+| --- | --- |
+| `~/AMY/important-temp/` | Project file indexes, fingerprints, and recent verified change summaries. |
+| `~/AMY/dump/temp/` | Temporary streams for capture tools and attachment extraction. Live thumbnails stay in memory. |
 
 ## Optional offline voice and web setup
 
@@ -96,10 +130,10 @@ On Hyprland, install the capture and English OCR tools when you want this featur
 sudo pacman -S --needed grim slurp tesseract tesseract-data-eng
 ```
 
-For Traditional Chinese OCR, also install `tesseract-data-chi_tra` and enable Traditional Chinese in Settings.
+For Traditional Chinese OCR, also install `tesseract-data-chi_tra`. Install the Tesseract language data for other text you want to read, then click **Refresh languages**.
 
 1. Open **Screen tools → Select area**. Drag a rectangle around the part of the screen you want AMY to read.
-2. Pick a reading or translation direction. Click **Start live**. Identical frames skip OCR. If OCR sees the same text after a visual change, AMY reuses the translation.
+2. Select an installed **Read language** and an optional **Translate to** language. Click **Start live**. The thumbnail shows the selected region while translation runs. Identical frames skip OCR. If OCR reads the same text after a visual change, AMY reuses the translation.
 3. Click **Pause live** to stop capture, or close the panel. Use **Select area** again to move or resize the captured region. Keep the results panel outside the selected area.
 4. Use **Identify** for a local vision description, **Search text** to preview a web query, or **Save image** to write a capture after approval. For images, AMY uses your selected model if it supports vision. Otherwise it looks for a compatible downloaded model and shows which one it uses.
 
@@ -115,4 +149,4 @@ To read a whole monitor, type `/screen 1 What does this error mean?`. Type `/scr
 
 ## Validation
 
-Headless tests exercise the Qt window, local Ollama API requests, settings and deletion, draft review and verified saves, cancellation, and repeated screen frames. On a Hyprland laptop, test real mic playback and region selection using the steps above.
+Headless tests cover local Ollama requests, chat history, choice submission, attachment extraction, scoped edits, reply settings, and the thumbnail and translation workflow. On a Hyprland laptop, test region selection, voice playback, and model timing with your installed models.

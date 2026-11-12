@@ -26,7 +26,19 @@ REPLY_STYLES = {
     "Balanced": "Give a direct answer in plain language. Add examples when they help.",
     "Concise": "Start with the answer. Use a few short sentences unless more detail is requested.",
     "Detailed": "Explain the reasoning in plain language. Use clear steps and a concrete example when useful.",
+    "Short, Simple, and Listed": (
+        "Use short sentences and simple words. Lead with the answer, then use bullets (•) for key points. "
+        "Use numbered lists for ordered steps and short paragraphs where they help explain an idea. "
+        "Keep enough detail to answer the question."
+    ),
 }
+OCR_NAMES = {
+    "eng": "English", "chi_tra": "Traditional Chinese", "chi_sim": "Simplified Chinese",
+    "ind": "Indonesian", "jpn": "Japanese", "kor": "Korean", "vie": "Vietnamese", "tha": "Thai",
+    "fra": "French", "spa": "Spanish", "deu": "German", "ita": "Italian", "por": "Portuguese",
+    "ara": "Arabic", "hin": "Hindi", "rus": "Russian", "msa": "Malay",
+}
+TRANSLATION_LANGUAGES = tuple(dict.fromkeys(OCR_NAMES.values()))
 MEDIA_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".wav", ".mp3", ".flac",
                ".ogg", ".m4a", ".mp4", ".webm", ".mkv"}
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,179}")
@@ -244,9 +256,12 @@ class LocalOllama:
         self.port = port
         self.process = None
         self.log = None
+        self.model_details = {}
+        self.model_digests = {}
+        self.models_checked = 0.0
 
-    def call(self, path, cancel, payload=None):
-        with closing(HTTPConnection("127.0.0.1", self.port, timeout=5)) as connection:
+    def call(self, path, cancel, payload=None, *, timeout=5):
+        with closing(HTTPConnection("127.0.0.1", self.port, timeout=timeout)) as connection:
             cancel.check()
             connection.connect()
             with cancel.interrupt_socket(connection.sock):
@@ -304,12 +319,18 @@ class LocalOllama:
             cancel.event.wait(0.15)
         raise RuntimeError("Local Ollama did not become ready. Try Refresh models.")
 
-    def models(self, cancel, progress):
-        self.ensure_running(cancel, progress)
-        result = self.call("/api/tags", cancel)
+    def models(self, cancel, progress, *, refresh=True):
+        if refresh or monotonic() - self.models_checked >= 30:
+            self.ensure_running(cancel, progress)
+        try:
+            result = self.call("/api/tags", cancel)
+        except ConnectionRefusedError:
+            self.ensure_running(cancel, progress)
+            result = self.call("/api/tags", cancel)
         if not isinstance(result.get("models"), list):
             raise RuntimeError("Ollama's downloaded-model list is unavailable.")
         models = {}
+        digests = {}
         for item in result["models"]:
             if not isinstance(item, dict):
                 continue
@@ -318,15 +339,28 @@ class LocalOllama:
             if (local_model_name(name) and not item.get("remote_host") and not item.get("remote_model")
                     and (not capabilities or "completion" in capabilities)):
                 models[name] = tuple(capabilities)
+                digest = item.get("digest")
+                if isinstance(digest, str) and digest:
+                    digests[name] = digest
+        self.model_details = {
+            name: details for name, details in self.model_details.items()
+            if not refresh and name in digests and self.model_digests.get(name) == digests[name]
+        }
+        self.model_digests = digests
+        self.models_checked = monotonic()
         return dict(sorted(models.items(), key=lambda pair: pair[0].casefold()))
 
     def require_model(self, model, cancel, progress, *, vision=False):
         if not model:
             raise RuntimeError("Tick an installed model in Settings → Models, then try again.")
-        models = self.models(cancel, progress)
+        cancel.check()
+        models = self.models(cancel, progress, refresh=False)
         if model not in models:
             raise RuntimeError(f"{model} is unavailable on this Ollama server. Refresh the list and choose a local model.")
-        details = self.call("/api/show", cancel, {"model": model})
+        details = self.model_details.get(model)
+        if details is None:
+            details = self.call("/api/show", cancel, {"model": model})
+            self.model_details[model] = details
         if details.get("remote_host") or details.get("remote_model"):
             raise RuntimeError("Choose a downloaded model that runs locally.")
         capabilities = details.get("capabilities") or models[model]
@@ -337,6 +371,9 @@ class LocalOllama:
         return capabilities
 
     def close(self):
+        self.model_details.clear()
+        self.model_digests.clear()
+        self.models_checked = 0.0
         if self.process is not None:
             amy.stop_voice_process(self.process)
             self.process = None
@@ -345,14 +382,23 @@ class LocalOllama:
             self.log = None
 
 
-def screen_command(argv, cancel, *, timeout, limit):
+@contextmanager
+def temporary_directory():
+    with amy.home_directory(("AMY", "dump", "temp"), created=[]):
+        yield amy.AMY_HOME / "dump" / "temp"
+
+
+def run_local_tool(argv, cancel, *, timeout, limit, data=None):
     executable = shutil.which(argv[0])
     if not executable:
         raise RuntimeError(f"Install {argv[0]} to use screen tools. See the Linux Desktop guide.")
     cancel.check()
-    amy.WORK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with TemporaryFile(dir=amy.WORK_DIR) as output, TemporaryFile(dir=amy.WORK_DIR) as errors:
-        with subprocess.Popen([executable, *argv[1:]], stdin=subprocess.DEVNULL, stdout=output,
+    with temporary_directory() as scratch, TemporaryFile(dir=scratch) as output, \
+            TemporaryFile(dir=scratch) as errors, TemporaryFile(dir=scratch) as incoming:
+        if data is not None:
+            incoming.write(data)
+            incoming.seek(0)
+        with subprocess.Popen([executable, *argv[1:]], stdin=incoming if data is not None else subprocess.DEVNULL, stdout=output,
                               stderr=errors, start_new_session=True) as process:
             deadline = monotonic() + timeout
             try:
@@ -387,7 +433,7 @@ def validate_region(region):
 
 
 def select_region(cancel):
-    result = screen_command(["slurp", "-f", "%x,%y %wx%h"], cancel, timeout=90, limit=120)
+    result = run_local_tool(["slurp", "-f", "%x,%y %wx%h"], cancel, timeout=90, limit=120)
     return validate_region(result.decode().strip())
 
 
@@ -395,7 +441,7 @@ def capture_region(region, cancel, *, max_side=1800):
     region = validate_region(region)
     width, height = (int(value) for value in region.split()[1].split("x"))
     scale = min(1.0, max_side / max(width, height))
-    image = screen_command(["grim", "-g", region, "-s", f"{scale:.6f}", "-l", "1", "-"],
+    image = run_local_tool(["grim", "-g", region, "-s", f"{scale:.6f}", "-l", "1", "-"],
                            cancel, timeout=8, limit=16_000_000)
     if len(image) < 33 or image[:16] != b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR":
         raise RuntimeError("The compositor did not return a PNG image.")
@@ -408,22 +454,40 @@ def capture_region(region, cancel, *, max_side=1800):
 class ScanFrame:
     fingerprint: bytes
     text: str
+    image: bytes = b""
 
 
-def scan_frame(region, previous, language, cancel):
+def ocr_languages():
+    executable = shutil.which("tesseract")
+    if executable is None:
+        return {}
+    try:
+        result = subprocess.run([executable, "--list-langs"], capture_output=True, text=True,
+                                errors="replace", timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if result.returncode:
+        return {}
+    return {code: OCR_NAMES.get(code, code) for code in result.stdout.splitlines()
+            if code not in ("osd", "equ") and re.fullmatch(r"[a-z][a-z0-9_/-]{1,39}", code)}
+
+
+def scan_frame(region, previous, language, cancel, *, on_image=None):
     image = capture_region(region, cancel)
     fingerprint = hashlib.sha256(image).digest()
     if previous is not None and fingerprint == previous.fingerprint:
         return previous
-    tool = amy.screen_ocr_tool(language, "")
-    if tool is None:
-        package = "tesseract-data-chi_tra" if language == "zh" else "tesseract-data-eng"
-        raise RuntimeError(f"Install Tesseract and {package} for this scan language.")
-    # Keep OCR limited to the chosen source language.
-    tool = tool[0], "chi_tra" if language == "zh" else "eng"
-    text = amy.read_screen_text(image, tool).strip()
+    if on_image is not None:
+        on_image(image)
+    if language in ("en", "zh"):
+        legacy = amy.screen_ocr_tool(language, "")
+        executable = legacy[0] if legacy else None
+        language = "chi_tra" if language == "zh" else "eng"
+    else:
+        executable = shutil.which("tesseract")
+    text = amy.read_screen_text(image, (executable, language)).strip() if executable and language else ""
     cancel.check()
-    return ScanFrame(fingerprint, text)
+    return ScanFrame(fingerprint, text, image)
 
 
 def save_region_image(image, filename):

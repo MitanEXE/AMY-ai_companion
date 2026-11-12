@@ -1,7 +1,11 @@
-# AMY
+# AMY Companion
 
-AMY is a local AI companion for Linux and Windows. It chats through Ollama
+**Adaptive Mind, Yours.** Many minds. One companion.
+
+AMY is a personal AI companion for Linux and Windows. It chats through local Ollama
 and previews project file changes for you to approve.
+
+A personal project by MitanEXE.
 
 | Your setup | Start here |
 | --- | --- |
@@ -26,7 +30,7 @@ containing this README.
    python install_amy_desktop.py
    ```
 
-3. Open **AMY** from your app launcher. Go to **Settings → Models** and select
+3. Open **AMY Companion** from your app launcher. Go to **Settings → Models** and select
    a downloaded model.
 
 If the list is empty, leave AMY open, download the default model, and click
@@ -40,6 +44,9 @@ If your models are already in Ollama on port `11434`, run the installer with
 `--port 11434` to use that server. Use the same port for model downloads.
 For voice, screen translation, or troubleshooting, see the
 [Linux desktop guide](docs/LINUX_DESKTOP.md).
+
+Use **New chat** for a separate conversation, **Attach** to read local files,
+and **Coding** to choose a project folder and review proposed code changes.
 
 ## Linux terminal
 

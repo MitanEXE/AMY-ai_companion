@@ -1,15 +1,15 @@
 """Qt views for AMY's desktop preferences, saved data and screen tools."""
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtCore import QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QFont, QFontDatabase, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFontComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget, QTreeWidget,
+    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget, QTreeWidget,
     QVBoxLayout, QWidget,
 )
 
-from amy_desktop_core import Preferences, REPLY_STYLES
+from amy_desktop_core import Preferences, REPLY_STYLES, TRANSLATION_LANGUAGES
 
 
 def label(text="", role=None):
@@ -43,6 +43,148 @@ def readonly(text=""):
     widget = QPlainTextEdit(text)
     widget.setReadOnly(True)
     return widget
+
+
+class ChoiceCard(QFrame):
+    submitted = Signal(int)
+
+    def __init__(self, choices):
+        super().__init__()
+        self.setObjectName("choiceCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        self.group = QButtonGroup(self)
+        for index, option in enumerate(choices):
+            tile = QFrame()
+            tile.setObjectName("choiceTile")
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(9, 7, 9, 8)
+            option_button = QRadioButton(f"{chr(65 + index)}   {option['title']}")
+            option_button.setAccessibleDescription(option["reason"])
+            self.group.addButton(option_button, index)
+            tile_layout.addWidget(option_button)
+            reason = label(option["reason"], "muted")
+            reason.setIndent(24)
+            tile_layout.addWidget(reason)
+            layout.addWidget(tile)
+        self.submit = button("Submit choice", self.submit_choice, "primary")
+        self.submit.setEnabled(False)
+        self.group.idToggled.connect(lambda _, checked: self.submit.setEnabled(checked or self.group.checkedId() >= 0))
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(self.submit)
+        layout.addLayout(actions)
+
+    def submit_choice(self):
+        selected = self.group.checkedId()
+        if self.submit.isEnabled() and selected >= 0:
+            self.submitted.emit(selected)
+
+    def retire(self):
+        for option in self.group.buttons():
+            option.setEnabled(False)
+        self.submit.setEnabled(False)
+
+
+class ChatTranscript(QScrollArea):
+    attachment_opened = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("transcript")
+        self.scroll_timer = QTimer(self, singleShot=True)
+        self.scroll_timer.timeout.connect(lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.messages = QWidget()
+        self.messages.setObjectName("messages")
+        self.setWidget(self.messages)
+        self.message_layout = QVBoxLayout(self.messages)
+        self.message_layout.setContentsMargins(6, 12, 11, 12)
+        self.message_layout.setSpacing(15)
+        self.message_layout.addStretch()
+        self.entries = []
+
+    def add_message(self, role, text, attachments=(), choices=()):
+        user = role in ("You", "Heard")
+        container = QWidget()
+        line = QHBoxLayout(container)
+        line.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        column = QVBoxLayout(content)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(5)
+        if not user or role == "Heard":
+            column.addWidget(label(role, "speaker"))
+        bubble = QFrame()
+        bubble.setObjectName("userBubble" if user else "replyBubble")
+        inside = QVBoxLayout(bubble)
+        inside.setContentsMargins(12, 9, 12, 9)
+        inside.setSpacing(6)
+        for item in attachments:
+            name = item.get("path", "").rsplit("/", 1)[-1] if isinstance(item, dict) else ""
+            if name:
+                chip = button(name, lambda checked=False, value=item: self.attachment_opened.emit(value), "fileLabel")
+                chip.setToolTip(f"Preview {name}")
+                inside.addLayout(row(chip))
+        message = label(text, "messageText")
+        inside.addWidget(message)
+        column.addWidget(bubble)
+        card = ChoiceCard(choices) if choices else None
+        if card is not None:
+            column.addWidget(card)
+        if user:
+            line.addStretch(1)
+        line.addWidget(content, 4)
+        if not user:
+            line.addStretch(1)
+        self.message_layout.insertWidget(self.message_layout.count() - 1, container)
+        self.entries.append((role, message))
+        self.scroll_to_end()
+        return message, card
+
+    def clear(self):
+        while self.message_layout.count() > 1:
+            item = self.message_layout.takeAt(0)
+            item.widget().hide()
+            item.widget().deleteLater()
+        self.entries.clear()
+
+    def scroll_to_end(self):
+        self.scroll_timer.start(0)
+
+    def resizeEvent(self, event):
+        bar = self.verticalScrollBar()
+        at_end = bar.value() >= bar.maximum() - 2
+        super().resizeEvent(event)
+        if at_end:
+            self.scroll_to_end()
+
+    def toPlainText(self):
+        return "\n\n".join(f"{role}\n{message.text()}" for role, message in self.entries)
+
+    def add_choices(self, message, choices):
+        card = ChoiceCard(choices)
+        message.parentWidget().parentWidget().layout().addWidget(card)
+        self.scroll_to_end()
+        return card
+
+    def add_image(self, message, data, save=None):
+        picture = QPixmap()
+        if not picture.loadFromData(data):
+            return
+        view = label()
+        view.setAccessibleName("Generated image")
+        view.setPixmap(picture.scaled(QSize(420, 340), Qt.AspectRatioMode.KeepAspectRatio,
+                                      Qt.TransformationMode.SmoothTransformation))
+        layout = message.parentWidget().layout()
+        layout.addWidget(view)
+        if save:
+            control = button("Save image")
+            control.clicked.connect(lambda: save(control))
+            layout.addLayout(row(control))
+        self.scroll_to_end()
 
 
 class SettingsView(QWidget):
@@ -267,7 +409,7 @@ class ScanPanel(QDialog):
     def __init__(self, parent):
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowTitle("AMY · Screen tools")
-        self.resize(525, 470)
+        self.resize(585, 645)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
@@ -277,9 +419,23 @@ class ScanPanel(QDialog):
         self.search = button("Search text")
         self.save = button("Save image")
         layout.addLayout(row(self.select, self.live))
-        self.direction = QComboBox()
-        self.configure_languages(False)
-        layout.addWidget(self.direction)
+        self.source = QComboBox()
+        self.source.addItem("Preview only", "")
+        self.target = QComboBox()
+        self.target.addItem("Read text only", "")
+        for language in TRANSLATION_LANGUAGES:
+            self.target.addItem(language, language)
+        self.refresh_languages = button("Refresh languages")
+        languages = QFormLayout()
+        languages.addRow("Read language", self.source)
+        languages.addRow("Translate to", self.target)
+        layout.addLayout(languages)
+        layout.addLayout(row(self.refresh_languages))
+        self.preview = label("Selected area preview", "scanPreview")
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setFixedHeight(142)
+        self.preview_image = QPixmap()
+        layout.addWidget(self.preview)
         self.status = label("Drag a rectangle around text or an image.", "muted")
         layout.addWidget(self.status)
         self.tabs = QTabWidget()
@@ -291,15 +447,34 @@ class ScanPanel(QDialog):
         layout.addLayout(row(self.identify, self.search, self.save))
         self.enable_area(False)
 
-    def configure_languages(self, chinese):
-        current = self.direction.currentData()
-        self.direction.clear()
-        self.direction.addItem("Read English text", ("en", ""))
-        if chinese:
-            self.direction.addItem("English → Traditional Chinese", ("en", "zh"))
-            self.direction.addItem("Traditional Chinese → English", ("zh", "en"))
-        index = self.direction.findData(current)
-        self.direction.setCurrentIndex(max(index, 0))
+    def set_languages(self, installed):
+        current = self.source.currentData()
+        self.source.blockSignals(True)
+        self.source.clear()
+        self.source.addItem("Preview only", "")
+        for code, name in sorted(installed.items(), key=lambda item: item[1]):
+            self.source.addItem(name, code)
+        index = self.source.findData(current) if current else self.source.findData("eng")
+        self.source.setCurrentIndex(max(0, index))
+        self.source.blockSignals(False)
+
+    def set_preview(self, data):
+        self.preview_image = QPixmap()
+        if data:
+            self.preview_image.loadFromData(data)
+        self.update_preview()
+
+    def update_preview(self):
+        if self.preview_image.isNull():
+            self.preview.setText("Selected area preview")
+        else:
+            self.preview.setPixmap(self.preview_image.scaled(
+                self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
+            ))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_preview()
 
     def enable_area(self, enabled):
         for widget in (self.live, self.identify, self.search, self.save):
