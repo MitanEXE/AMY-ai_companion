@@ -1,4 +1,4 @@
-# AMY-ai_companion
+[# AMY-ai_companion
 
 AMY is a local AI companion for Windows and Linux terminals. It uses Ollama for chat and
 supports voice, local tools, screen reading, and project file creation with an
@@ -62,3 +62,4 @@ notes locally. The installer preserves existing profiles and notes.
 
 [MIT](LICENSE). Model weights and downloaded dependencies are governed by their
 own licenses.
+](https://github.com/MitanEXE/AMY-ai_companion)
