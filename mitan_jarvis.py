@@ -972,7 +972,7 @@ def screen_ocr_tool(language, question):
     return executable, codes
 
 
-def read_screen_text(image, ocr_tool):
+def read_screen_text(image, ocr_tool, *, strict=False):
     executable, languages = ocr_tool
     try:
         result = subprocess.run(
@@ -981,8 +981,16 @@ def read_screen_text(image, ocr_tool):
             env={**os.environ, "OMP_THREAD_LIMIT": "2"},
         )
     except (OSError, subprocess.TimeoutExpired):
+        if strict:
+            raise
         return ""
-    if result.returncode or len(result.stdout) > 512_000:
+    if result.returncode:
+        if strict:
+            raise subprocess.CalledProcessError(result.returncode, result.args)
+        return ""
+    if len(result.stdout) > 512_000:
+        if strict:
+            raise RuntimeError("The OCR output exceeded the text limit. Try a smaller area.")
         return ""
     groups = {}
     for row in csv.DictReader(StringIO(result.stdout.decode("utf-8", errors="replace")), delimiter="\t", quoting=csv.QUOTE_NONE):

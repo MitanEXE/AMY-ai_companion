@@ -409,13 +409,15 @@ class ScanPanel(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
         self.select = button("Select area", role="primary")
+        self.translate = button("Translate")
         self.live = button("Start live")
         self.identify = button("Identify")
         self.search = button("Search text")
         self.save = button("Save image")
-        layout.addLayout(row(self.select, self.live))
+        layout.addLayout(row(self.select, self.translate, self.live))
         self.source = QComboBox()
         self.source.addItem("Preview only", "")
+        self.source.setToolTip("Choose the language written in the selected area.")
         self.target = QComboBox()
         self.target.addItem("Read text only", "")
         for language in TRANSLATION_LANGUAGES:
@@ -435,21 +437,28 @@ class ScanPanel(QDialog):
         layout.addWidget(self.status)
         self.tabs = QTabWidget()
         self.translation = readonly()
+        self.translation.setPlaceholderText("Choose the read and target languages, then click Translate or Start live.")
         self.original = readonly()
+        self.identification = readonly()
+        self.identification.setPlaceholderText("Click Identify for a description of the selected area.")
         self.tabs.addTab(self.translation, "Translation")
         self.tabs.addTab(self.original, "Screen text")
+        self.tabs.addTab(self.identification, "Identification")
         layout.addWidget(self.tabs, 1)
         layout.addLayout(row(self.identify, self.search, self.save))
         self.enable_area(False)
 
     def set_languages(self, installed):
         current = self.source.currentData()
+        had_languages = self.source.count() > 1
         self.source.blockSignals(True)
         self.source.clear()
         self.source.addItem("Preview only", "")
         for code, name in sorted(installed.items(), key=lambda item: item[1]):
             self.source.addItem(name, code)
-        index = self.source.findData(current) if current else self.source.findData("eng")
+        index = self.source.findData(current) if current or had_languages else -1
+        if index < 0 and installed:
+            index = self.source.findData("eng") if "eng" in installed else 1
         self.source.setCurrentIndex(max(0, index))
         self.source.blockSignals(False)
 
@@ -472,7 +481,7 @@ class ScanPanel(QDialog):
         self.update_preview()
 
     def enable_area(self, enabled):
-        for widget in (self.live, self.identify, self.search, self.save):
+        for widget in (self.translate, self.live, self.identify, self.search, self.save):
             widget.setEnabled(enabled)
 
     def closeEvent(self, event):

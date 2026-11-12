@@ -27,7 +27,17 @@ AMY defaults to `127.0.0.1:11435`, the port used by the original AMY setup. It c
 
 If your downloaded models are on Ollama's standard service at port `11434`, run `python install_amy_desktop.py --port 11434` in the AMY folder. You can also pass `--port 11434` to `amy_desktop.py` when launching directly.
 
-To update from an older ZIP, close AMY, extract the new release into a folder you intend to keep, and rerun the installer there. This updates the launcher and installs PDF support. The desktop uses the same settings and local Ollama models.
+To update from an older ZIP, close AMY, extract the new release into a folder you intend to keep, and rerun the installer there. The desktop uses your existing settings and local Ollama models.
+
+If your launcher shows two entries called **AMY Companion**, read the install preview. It lists extra user-local entries that point to the AMY desktop script. After you approve, the installer updates the active launcher and moves the listed extras aside with a `.disabled` suffix. Open your app launcher again after installation.
+
+If both entries still appear, list the matching launchers before changing any files.
+
+```bash
+grep -iRl --include='*.desktop' '^Name=AMY Companion$' \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/applications" "$HOME/.local/share/applications" \
+  /usr/local/share/applications /usr/share/applications 2>/dev/null | sort -u
+```
 
 ## Choose your model
 
@@ -58,7 +68,18 @@ You can specify a name, for example `/file surprise.html Create a small interact
 
 ## Set up the way AMY replies
 
-In **Settings → General**, choose **Balanced**, **Concise**, **Detailed**, or **Short, Simple, and Listed**. The last preset uses bullets for key points, numbered lists for steps, and short paragraphs for explanations. You can also add a custom preference, choose the theme, change the installed font and font size, and set voice and web preferences. Click **Save settings**.
+In **Settings → General**, choose a reply style and click **Save settings**.
+
+| Style | How AMY replies |
+| --- | --- |
+| Short | Aims for one or two sentences with the essential facts. |
+| Simple | Uses familiar words and explains terms in plain language. |
+| Balanced | Gives a direct answer with enough explanation to follow it. |
+| Concise | Keeps key reasons and steps with minimal wording. |
+| Detailed | Explains reasoning, steps, and examples where useful. |
+| Listed | Uses bullets for key points, numbers for steps, and short paragraphs for explanations. |
+
+If you used the old combined style, AMY loads it as **Listed**. **Custom preferences** can add a tone or formatting preference to any style. This page also has theme, font, voice, and web settings.
 
 **English only** is the default for chat and voice. Choose **English + Traditional Chinese** to enable Chinese replies and Mandarin microphone input. Screen tools have their own language choices.
 
@@ -125,11 +146,18 @@ sudo pacman -S --needed grim slurp tesseract tesseract-data-eng
 For Traditional Chinese OCR, also install `tesseract-data-chi_tra`. Install the Tesseract language data for other text you want to read, then click **Refresh languages**.
 
 1. Open **Screen tools → Select area**. Drag a rectangle around the part of the screen you want AMY to read.
-2. Select an installed **Read language** and an optional **Translate to** language. Click **Start live**. The thumbnail shows the selected region while translation runs. Identical frames skip OCR. If OCR reads the same text after a visual change, AMY reuses the translation.
-3. Click **Pause live** to stop capture, or close the panel. Use **Select area** again to move or resize the captured region. Keep the results panel outside the selected area.
-4. Use **Identify** for a local vision description, **Search text** to preview a web query, or **Save image** to write a capture after approval. For images, AMY uses your selected model if it supports vision. Otherwise it looks for a compatible downloaded model and shows which one it uses.
+2. Set **Read language** to the language on the screen. Set **Translate to** to the language you want to read.
+3. Click **Translate** after each new selection. **Screen text** shows what OCR read, and **Translation** fills in as the local model replies. Translation uses text and runs with Think off.
+4. Click **Start live** for ongoing translation. Identical frames skip OCR, and unchanged text reuses the translation while the thumbnail updates. Click **Pause live** to stop, or close the panel. Keep the results panel outside the capture area.
+5. **Identify** opens a vision description in **Identification**. **Search text** previews a web query, and **Save image** saves a capture after approval. AMY shows which downloaded vision model it uses for identification.
 
 To read a whole monitor, type `/screen 1 What does this error mean?`. Type `/screenshot 1` to preview a screenshot save. Screen reads and translations use temporary data. Images appear in **Saved media** after an approved save.
+
+## About and Logs
+
+Open **About** in the sidebar to see AMY's project details and local Ollama address. Click **Open desktop log** or **Open Logs folder** to inspect `~/AMY/Logs/desktop.log`.
+
+The log keeps recent activity names, timestamps, durations, and diagnostic codes. AMY keeps up to 256 KiB of recent entries.
 
 ## Manage memory, media and lessons
 

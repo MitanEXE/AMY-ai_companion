@@ -14,7 +14,7 @@ from pathlib import Path
 from time import monotonic
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QImageReader, QPalette, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QImageReader, QPalette, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QScrollArea, QStackedWidget,
@@ -238,7 +238,7 @@ class AMYWindow(QMainWindow):
         self.nav_group.addButton(self.coding_button)
         nav.addWidget(self.coding_button)
         nav.addWidget(button("Screen tools", self.open_scan, "navButton"))
-        for index, name in enumerate(("Memory", "Saved media", "Settings"), 1):
+        for index, name in enumerate(("Memory", "Saved media", "Settings", "About"), 1):
             item = button(name, lambda checked=False, i=index: self.open_page(i), "navButton")
             item.setCheckable(True)
             self.nav_group.addButton(item, index)
@@ -267,7 +267,7 @@ class AMYWindow(QMainWindow):
         self.scan = ScanPanel(self)
         self.ocr_installed = {}
         self.scan_languages_checked = False
-        for view in (self.memory, self.media, self.settings):
+        for view in (self.memory, self.media, self.settings, self.build_about()):
             self.pages.addWidget(view)
         self.bind_views()
         self.settings.load(preferences)
@@ -298,9 +298,12 @@ class AMYWindow(QMainWindow):
         self.refresh_chat_list()
         self.restore_conversation()
         self.open_page(0)
+        self.log_activity("desktop", "Started")
         if preference_error:
+            self.log_activity("settings", "Could not load saved preferences")
             self.message("AMY", f"Desktop settings could not be read. {preference_error}", persist=False)
         if self.chat_error:
+            self.log_activity("chat history", "Could not load saved chats")
             self.message("AMY", self.chat_error, persist=False)
         if load_models:
             QTimer.singleShot(0, self.refresh_models)
@@ -377,6 +380,53 @@ class AMYWindow(QMainWindow):
         layout.addWidget(composer_box)
         self.pages.addWidget(chat)
 
+    def build_about(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        layout.addWidget(label("AMY Companion", "brand"))
+        layout.addWidget(label("Adaptive Mind, Yours", "section"))
+        layout.addWidget(label("Many minds. One companion.", "muted"))
+        layout.addWidget(label("A personal project by MitanEXE", "muted"))
+        layout.addWidget(label(f"Linux desktop · Ollama on 127.0.0.1:{self.ollama.port}", "muted"))
+
+        diagnostics = QFrame()
+        diagnostics.setObjectName("card")
+        panel = QVBoxLayout(diagnostics)
+        panel.setContentsMargins(15, 14, 15, 14)
+        panel.addWidget(label("Diagnostics", "section"))
+        panel.addWidget(label("AMY records local activity and error codes here.", "muted"))
+        panel.addWidget(label(str(amy.AMY_HOME / "Logs" / desktop.LOG_FILE), "fileLabel"))
+        panel.addLayout(row(button("Open Logs folder", self.open_logs),
+                            button("Open desktop log", lambda: self.open_logs(file=True))))
+        self.log_status = label("", "muted")
+        self.log_status.hide()
+        panel.addWidget(self.log_status)
+        layout.addWidget(diagnostics)
+        layout.addStretch()
+        return page
+
+    def log_activity(self, activity, outcome, error=None):
+        try:
+            desktop.record_log(activity, outcome, error)
+        except (OSError, RuntimeError, ValueError):
+            self.log_status.setText("Couldn't write the desktop log. Check access to ~/AMY/Logs.")
+            self.log_status.show()
+        else:
+            self.log_status.hide()
+
+    def open_logs(self, *, file=False):
+        folder = amy.AMY_HOME / "Logs"
+        try:
+            with amy.home_directory(desktop.LOG_PARTS, created=[]) as directory:
+                if file and amy.snapshot(directory, desktop.LOG_FILE, desktop.LOG_LIMIT)[0] is None:
+                    raise FileNotFoundError("The log appears after AMY records its first activity.")
+            self.open_path(folder / desktop.LOG_FILE if file else folder)
+        except (OSError, RuntimeError, ValueError) as error:
+            self.log_status.setText(str(error))
+            self.log_status.show()
+
     def bind_views(self):
         self.settings.refresh_models.connect(self.refresh_models)
         self.settings.pick_model.connect(self.pick_model)
@@ -395,6 +445,7 @@ class AMYWindow(QMainWindow):
         self.media.folder.clicked.connect(self.open_media_folder)
         self.media.delete.clicked.connect(self.delete_media)
         self.scan.select.clicked.connect(self.select_scan_area)
+        self.scan.translate.clicked.connect(self.translate_selected_area)
         self.scan.live.clicked.connect(self.toggle_scan)
         self.scan.identify.clicked.connect(self.identify_scan)
         self.scan.search.clicked.connect(self.search_scan)
@@ -451,6 +502,7 @@ class AMYWindow(QMainWindow):
         try:
             self.chats.save()
         except (OSError, RuntimeError, ValueError) as error:
+            self.log_activity("chat history", "Save failed", error)
             self.set_status(f"Chat history could not be saved. {error}")
 
     def clear_chat_context(self):
@@ -576,7 +628,7 @@ class AMYWindow(QMainWindow):
         elapsed = f"   {int(monotonic() - self.job_started)}s" if self.job is not None else ""
         self.status_label.setText(self.status_text + elapsed)
 
-    def start_job(self, kind, work, on_success, *, can_stop=True, initial="Working…"):
+    def start_job(self, kind, work, on_success, *, can_stop=True, initial="Working…", on_chunk=None):
         if self.job is not None or self.closing:
             return False
         token = desktop.Cancellation()
@@ -601,7 +653,7 @@ class AMYWindow(QMainWindow):
         self.media.setEnabled(False)
         signals = JobSignals(self)
         signals.status.connect(self.set_status, Qt.ConnectionType.QueuedConnection)
-        signals.chunk.connect(self.append_chunk, Qt.ConnectionType.QueuedConnection)
+        signals.chunk.connect(on_chunk or self.append_chunk, Qt.ConnectionType.QueuedConnection)
         signals.done.connect(self.finish_job, Qt.ConnectionType.QueuedConnection)
         self.job_signals = signals
 
@@ -620,6 +672,13 @@ class AMYWindow(QMainWindow):
     @Slot(object, object)
     def finish_job(self, result, error):
         kind, done = self.job_kind, self.job_done
+        elapsed = monotonic() - self.job_started
+        if isinstance(error, desktop.Cancelled):
+            self.log_activity(kind, f"Stopped after {elapsed:.1f}s")
+        elif error is not None:
+            self.log_activity(kind, f"Failed after {elapsed:.1f}s", error)
+        else:
+            self.log_activity(kind, f"Worker finished in {elapsed:.1f}s")
         self.job = self.job_done = None
         self.job_kind = ""
         self.job_signals.deleteLater()
@@ -667,7 +726,7 @@ class AMYWindow(QMainWindow):
             try:
                 done(result)
             except (OSError, RuntimeError, ValueError) as caught:
-                self.report_error(caught)
+                self.report_error(caught, kind)
         self.continue_voice()
 
     def stop_current(self):
@@ -693,7 +752,8 @@ class AMYWindow(QMainWindow):
         dialog.exec()
         return dialog.clickedButton() is accept
 
-    def report_error(self, error):
+    def report_error(self, error, activity="desktop"):
+        self.log_activity(activity, "Failed", error)
         dialog = QMessageBox(QMessageBox.Icon.Warning, "AMY", str(error) or type(error).__name__, parent=self)
         dialog.setTextFormat(Qt.TextFormat.PlainText)
         dialog.exec()
@@ -807,6 +867,7 @@ class AMYWindow(QMainWindow):
             else:
                 self.route_message(question, voice)
         except (OSError, RuntimeError, ValueError) as error:
+            self.log_activity("message", "Failed", error)
             self.message("AMY", str(error))
             self.continue_voice()
 
@@ -1431,7 +1492,7 @@ class AMYWindow(QMainWindow):
                 cancel=token, quiet=True, on_limit=warning.append, use_training=False,
                 attachment_context=references, attachment_images=images,
                 response_hints=f"{IMAGE_HINT}\n{CHOICE_HINT}" if stream else "",
-                reply_timing=timing, max_reply_tokens=320 if preferences.style in ("Concise", "Short, Simple, and Listed")
+                reply_timing=timing, max_reply_tokens=320 if preferences.style in ("Short", "Concise")
                 and not use_think else None,
             )
             answer, choices = stream.finish(answer) if stream else (answer, [])
@@ -1830,6 +1891,7 @@ class AMYWindow(QMainWindow):
         self.scan.set_languages(self.ocr_installed)
         self.reset_scan()
         if not self.ocr_installed:
+            self.log_activity("scan OCR", "No installed OCR languages detected")
             self.scan.status.setText("Install Tesseract language data to read text. Preview still works.")
 
     def select_scan_area(self):
@@ -1842,6 +1904,8 @@ class AMYWindow(QMainWindow):
         def selected(region):
             self.scan_region = region
             self.reset_scan()
+            self.scan.identification.clear()
+            self.scan.set_preview(b"")
             self.scan.enable_area(True)
             self.open_scan()
             self.scan.status.setText(f"Selected area · {region}")
@@ -1855,12 +1919,14 @@ class AMYWindow(QMainWindow):
         self.scan_generation += 1
         if self.capture_token is not None:
             self.capture_token.stop()
-        if self.job_kind == "scan translation" and self.job is not None:
+        if self.job_kind in ("scan reading", "scan translation") and self.job is not None:
             self.job.stop()
         self.scan_frame = None
         self.scan_result_key = None
         self.scan.translation.clear()
         self.scan.original.clear()
+        if self.scan_live:
+            self.scan.tabs.setCurrentWidget(self.scan.translation if self.scan.target.currentData() else self.scan.original)
 
     def toggle_scan(self):
         if self.scan_live:
@@ -1871,6 +1937,7 @@ class AMYWindow(QMainWindow):
         self.stop_current()
         self.scan_live = True
         self.scan.live.setText("Pause live")
+        self.scan.tabs.setCurrentWidget(self.scan.translation if self.scan.target.currentData() else self.scan.original)
         self.scan_clock.start()
         self.scan_tick()
 
@@ -1884,7 +1951,7 @@ class AMYWindow(QMainWindow):
             self.capture_token.stop()
         if was_live:
             self.scan.status.setText("Live scanning paused.")
-        if self.job_kind == "scan translation" and self.job is not None:
+        if self.job_kind in ("scan reading", "scan translation") and self.job is not None:
             self.job.stop()
 
     def scan_tick(self, *, preview_only=False):
@@ -1924,6 +1991,7 @@ class AMYWindow(QMainWindow):
             return
         if error is not None:
             if not isinstance(error, desktop.Cancelled):
+                self.log_activity("scan preview", "Failed", error)
                 self.pause_scan()
                 self.scan.status.setText(str(error))
             return
@@ -1932,53 +2000,87 @@ class AMYWindow(QMainWindow):
             self.scan.set_preview(frame.image)
         if preview_only or not self.scan_live:
             return
+        if self.job_kind == "scan translation" and self.scan_frame is not None and self.scan_frame.text != frame.text:
+            self.job.stop()
+            self.scan.translation.clear()
         self.scan_frame = frame
         self.translate_scan()
 
-    def translate_scan(self):
+    def translate_selected_area(self):
+        if not self.scan_region:
+            return
+        if self.job is not None:
+            self.scan.status.setText("Wait for the current activity to finish or click Stop.")
+            return
+        source = self.scan.source.currentData()
+        if not source or not self.scan.target.currentData():
+            self.scan.status.setText("Choose the Read language and Translate to language first.")
+            return
+        self.stop_current()
+        self.reset_scan()
+        self.scan.tabs.setCurrentWidget(self.scan.translation)
+        region, generation = self.scan_region, self.scan_generation
+
+        def work(token, _status, _chunk):
+            return desktop.scan_frame(region, None, source, token, on_image=lambda data:
+                                      self.scan_signals.preview.emit(generation, data))
+
+        def read(frame):
+            if generation == self.scan_generation and self.scan.isVisible():
+                self.scan_frame = frame
+                self.translate_scan(once=True)
+
+        self.start_job("scan reading", work, read, initial="Reading selected text locally…")
+
+    def translate_scan(self, *, once=False):
         frame = self.scan_frame
         source, target = self.scan.source.currentData(), self.scan.target.currentData()
         model = self.preferences.model
+        generation = self.scan_generation
         key = (self.scan_region, source, target, model, frame.text)
         if key == self.scan_result_key:
-            if self.job_kind != "scan translation":
-                self.scan.status.setText("Text unchanged · Preview live")
             return
+        if self.scan_result_key is not None:
+            self.scan_result_key = None
+            self.scan.translation.clear()
         self.scan.original.setPlainText(frame.text)
         if not source or not frame.text or not target:
             self.scan_result_key = key
-            self.scan.translation.clear()
-            self.scan.tabs.setCurrentIndex(1)
-            self.scan.status.setText("Preview live." if not source else
-                                     "Reading selected area." if frame.text else "No clear text in the selected area.")
+            if not source:
+                text = "Preview live · Choose a Read language to read text."
+            elif not frame.text:
+                text = "No clear text found. Check the Read language or select a larger area."
+                self.log_activity("scan OCR", "No clear text found")
+            else:
+                text = "Screen text ready · Choose a Translate to language to translate it."
+            self.scan.status.setText(text)
             return
         if self.job is not None:
             return
 
-        def work(token, status, _chunk):
-            self.ollama.require_model(model, token, status)
-            truncated = []
-            answer = amy.ask_ollama(
-                self.ollama.port, "Translate the extracted text faithfully. Return only the translation. Keep the original line breaks.",
-                [], False, False, model=model, screen_text=amy.screen_text_excerpt(frame.text, 3000),
-                output_language=target, screen_detail=True, cancel=token, quiet=True, use_training=False,
-                max_reply_tokens=768, on_limit=truncated.append,
-            )
-            return answer, bool(truncated)
+        def current():
+            return (generation == self.scan_generation and self.scan.isVisible()
+                    and (once or (self.scan_live and self.scan_frame.text == frame.text)))
+
+        def publish(piece):
+            if current() and self.job is not None and not self.job.event.is_set():
+                self.scan.translation.moveCursor(QTextCursor.MoveOperation.End)
+                self.scan.translation.insertPlainText(piece)
 
         def translated(result):
-            translation, truncated = result
-            current = (self.scan_region, self.scan.source.currentData(), self.scan.target.currentData(),
-                       self.preferences.model, self.scan_frame.text if self.scan_frame else None)
-            if not self.scan_live or key != current:
+            translation, partial = result
+            if not current():
                 return
             self.scan_result_key = key
             self.scan.translation.setPlainText(translation)
-            self.scan.tabs.setCurrentIndex(0)
-            self.scan.status.setText("Translation reached the output limit. Select a smaller area." if truncated
-                                     else f"Translated to {target} · Preview live")
+            suffix = " · Preview live" if self.scan_live else ""
+            self.scan.status.setText("Partial translation. Select a smaller area." if partial
+                                     else f"Translated to {target}{suffix}")
 
-        self.start_job("scan translation", work, translated, initial=f"Translating to {target} locally…")
+        self.scan.translation.clear()
+        self.start_job("scan translation",
+                       lambda token, status, chunk: self.ollama.translate_text(model, frame.text, target, token, status, chunk),
+                       translated, initial=f"Translating to {target} locally…", on_chunk=publish)
 
     def identify_scan(self):
         if not self.scan_region or self.job is not None:
@@ -1996,8 +2098,8 @@ class AMYWindow(QMainWindow):
             )
 
         def done(answer):
-            self.scan.translation.setPlainText(answer)
-            self.scan.tabs.setCurrentIndex(0)
+            self.scan.identification.setPlainText(answer)
+            self.scan.tabs.setCurrentWidget(self.scan.identification)
             self.scan.status.setText("Image analyzed locally.")
 
         self.start_job("scan identify", work, done, initial="Checking for a local vision model…")

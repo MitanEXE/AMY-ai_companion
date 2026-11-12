@@ -5,10 +5,11 @@ import os
 import sys
 import threading
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.util import find_spec
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
@@ -26,6 +27,7 @@ if HAS_QT:
     import amy_desktop_core as desktop
     import amy_desktop_files as files
     from amy_desktop_sessions import ChatStore, CHOICE_TAG
+    import install_amy_desktop as installer
     import mitan_jarvis as amy
 
 HTML = "<!doctype html>\n<html><body><button>Surprise</button></body></html>\n"
@@ -90,8 +92,11 @@ class OllamaFixture(BaseHTTPRequestHandler):
         if self.server.stall:
             self.server.release.wait(8)
         try:
-            for event in events:
+            for index, event in enumerate(events):
                 self.wfile.write((json.dumps(event) + "\n").encode())
+                if index == 0 and self.server.stall_after_chunk:
+                    self.wfile.flush()
+                    self.server.release.wait(8)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -128,6 +133,7 @@ class DesktopTests(unittest.TestCase):
         ]
         self.server.finish_reason = "stop"
         self.server.stall = False
+        self.server.stall_after_chunk = False
         self.server.release = threading.Event()
         worker = threading.Thread(target=self.server.serve_forever, daemon=True)
         worker.start()
@@ -332,7 +338,7 @@ class DesktopTests(unittest.TestCase):
                 patch.object(amy, "read_screen_text", return_value="Hello.") as ocr:
             frame = desktop.scan_frame("0,0 200x100", None, "en", token)
             self.assertIs(frame, desktop.scan_frame("0,0 200x100", frame, "en", token))
-            ocr.assert_called_once_with(b"same frame", ("tesseract", "eng"))
+            ocr.assert_called_once_with(b"same frame", ("tesseract", "eng"), strict=True)
 
     def test_live_translation_is_reused_after_visual_only_change(self):
         self.window.scan.set_languages({"eng": "English", "jpn": "Japanese"})
@@ -368,6 +374,119 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("Indonesian", self.server.requests[0]["messages"][0]["content"])
         self.assertIn("Translated to Indonesian", self.window.scan.status.text())
         self.window.scan.close()
+
+    def test_translate_each_selected_box_and_keep_identification_separate(self):
+        scan = self.window.scan
+        first = "0,0 200x100"
+        second = "250,10 300x120"
+        image = self.image_bytes(0xFF234567)
+
+        def frame(region, _previous, source, _token, *, on_image):
+            on_image(image)
+            text = {first: "Good morning.", second: "歡迎。"}[region] if source else ""
+            return desktop.ScanFrame(region.encode(), text, image)
+
+        with patch.object(desktop, "ocr_languages", return_value={"eng": "English", "chi_tra": "Traditional Chinese"}), \
+                patch.object(desktop, "select_region", side_effect=(first, second)), \
+                patch.object(desktop, "scan_frame", side_effect=frame), \
+                patch.object(desktop, "capture_region", return_value=image):
+            self.window.open_scan()
+            scan.select.click()
+            self.wait_for(lambda: self.window.job is None and not scan.preview_image.isNull())
+            self.assertTrue(scan.translate.isEnabled())
+            scan.translate.click()
+            self.assertIn("Choose the Read language", scan.status.text())
+            self.assertFalse(self.server.requests)
+
+            scan.target.setCurrentIndex(scan.target.findData("Traditional Chinese"))
+            self.server.answer = "早安，歡迎。"
+            self.server.stall_after_chunk = True
+            scan.translate.click()
+            self.wait_for(lambda: scan.translation.toPlainText() == "早安，")
+            self.assertEqual(self.window.job_kind, "scan translation")
+            self.assertFalse(self.window.scan_live)
+            self.assertEqual(scan.original.toPlainText(), "Good morning.")
+            request = self.server.requests[-1]
+            self.assertFalse(request["think"])
+            self.assertEqual(request["messages"][-1], {"role": "user", "content": "Good morning."})
+            self.assertIn("into Traditional Chinese", request["messages"][0]["content"])
+            self.server.stall_after_chunk = False
+            self.server.release.set()
+            self.wait_for(lambda: self.window.job is None)
+            self.assertEqual(scan.translation.toPlainText(), "早安，歡迎。")
+
+            self.server.answer = "A line of text."
+            scan.identify.click()
+            self.wait_for(lambda: self.window.job is None)
+            self.assertEqual(scan.identification.toPlainText(), "A line of text.")
+            self.assertIs(scan.tabs.currentWidget(), scan.identification)
+            self.assertEqual(scan.translation.toPlainText(), "早安，歡迎。")
+            self.assertIn("images", self.server.requests[-1]["messages"][-1])
+
+            scan.select.click()
+            self.wait_for(lambda: self.window.job is None and not scan.preview_image.isNull())
+            self.assertFalse(scan.translation.toPlainText())
+            self.assertFalse(scan.identification.toPlainText())
+            scan.source.setCurrentIndex(scan.source.findData("chi_tra"))
+            scan.target.setCurrentIndex(scan.target.findData("English"))
+            self.server.answer = "Welcome."
+            scan.translate.click()
+            self.wait_for(lambda: self.window.job is None and scan.translation.toPlainText() == "Welcome.")
+            self.assertEqual(scan.original.toPlainText(), "歡迎。")
+            self.assertIs(scan.tabs.currentWidget(), scan.translation)
+            self.assertIn("into English", self.server.requests[-1]["messages"][0]["content"])
+        scan.close()
+
+    def test_about_opens_local_logs_and_errors_exclude_private_details(self):
+        self.window.nav_buttons[4].click()
+        self.assertEqual(self.window.title.text(), "About")
+        page = self.window.pages.currentWidget()
+        labels = {item.text() for item in page.findChildren(QLabel)}
+        self.assertIn("Adaptive Mind, Yours", labels)
+        self.assertIn("A personal project by MitanEXE", labels)
+        path = self.home / "AMY/Logs/desktop.log"
+        self.assertIn(str(path), labels)
+
+        def fail(_token, _status, _chunk):
+            raise desktop.DiagnosticError("ocr_exit_1", "Private screen text from an error")
+
+        self.window.start_job("scan reading", fail, lambda _: None)
+        self.wait_for(lambda: self.window.job is None)
+        content = path.read_text()
+        self.assertIn("desktop | Started", content)
+        self.assertIn("scan reading | Failed", content)
+        self.assertIn("ocr_exit_1", content)
+        self.assertNotIn("Private screen text", content)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+        buttons = {item.text(): item for item in page.findChildren(QPushButton)}
+        with patch.object(self.window, "open_path") as opener:
+            buttons["Open Logs folder"].click()
+            opener.assert_called_once_with(path.parent)
+            buttons["Open desktop log"].click()
+            self.assertEqual(opener.call_args.args, (path,))
+
+    def test_installer_moves_only_reviewed_amy_launchers(self):
+        folder = self.home / ".local/share/applications"
+        folder.mkdir(parents=True)
+        current = folder / "amy.desktop"
+        old = folder / "amy-old.desktop"
+        changed = folder / "changed.desktop"
+        unrelated = folder / "other.desktop"
+        interpreter = self.data / "desktop-env/bin/python"
+        entry = installer.desktop_entry(interpreter, self.home / "Old AMY/amy_desktop.py", 11435)
+        for path in (current, old, changed):
+            path.write_text(entry)
+        unrelated.write_text(entry.replace("amy_desktop.py", "other_app.py"))
+        duplicates = installer.duplicate_launchers(self.home, current)
+        self.assertEqual({item[0] for item in duplicates}, {old, changed})
+        changed.write_text(entry.replace("amy_desktop.py", "different.py"))
+        with redirect_stdout(StringIO()):
+            installer.retire_duplicate_launchers(self.home, duplicates)
+        self.assertFalse(old.exists())
+        backup, = folder.glob("amy-old.desktop.*.disabled")
+        self.assertEqual(backup.read_text(), entry)
+        self.assertTrue(all(path.exists() for path in (current, changed, unrelated)))
 
     def test_saved_chats_keep_attachments_and_context_separate(self):
         original = self.window.normal_chat
@@ -506,16 +625,26 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(workspace.relevant("Check main.py", token)[0][("main.py",)][0], b"value = 22\n")
             self.assertEqual(read.call_count, 2)
 
-    def test_short_simple_listed_style_is_sent_with_think_disabled(self):
-        style = "Short, Simple, and Listed"
-        self.window.save_settings(replace(self.window.preferences, style=style))
+    def test_six_reply_styles_and_migration_to_listed(self):
+        picker = self.window.settings.style
+        self.assertEqual([picker.itemText(index) for index in range(picker.count())],
+                         ["Short", "Simple", "Balanced", "Concise", "Detailed", "Listed"])
+        path = self.data / desktop.PREFERENCES
+        values = json.loads(path.read_text())
+        values.update(style="Short, Simple, and Listed", style_details="Use practical examples.")
+        path.write_text(json.dumps(values))
+        migrated = desktop.load_preferences()
+        self.assertEqual(migrated.style, "Listed")
+        self.assertEqual(migrated.model, self.window.preferences.model)
+        self.window.save_settings(migrated)
         self.send("Explain Python lists.")
         self.wait_for(lambda: self.window.job is None)
         request = self.server.requests[-1]
         self.assertFalse(request["think"])
         self.assertIn("use bullets (•) for key points", request["messages"][0]["content"])
         self.assertIn("short paragraphs", request["messages"][0]["content"])
-        self.assertEqual(desktop.load_preferences().style, style)
+        self.assertIn("Use practical examples.", request["messages"][0]["content"])
+        self.assertEqual(desktop.load_preferences().style, "Listed")
 
     def test_legacy_image_command_stays_local(self):
         metadata = list(self.server.metadata)
