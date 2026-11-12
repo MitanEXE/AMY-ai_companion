@@ -1,65 +1,107 @@
-# AMY-ai_companion
+# AMY
 
-AMY is a local AI companion with a desktop app for Linux and a terminal interface.
-It uses Ollama for chat, with optional voice, screen reading, and project file creation
-with an approval preview.
+AMY is a local AI companion for Linux and Windows. It chats through Ollama
+and previews project file changes for you to approve.
 
-## Install AMY
+| Your setup | Start here |
+| --- | --- |
+| Linux desktop | [Install the app on Arch Linux](#linux-desktop) |
+| Linux terminal | [Run in a terminal](#linux-terminal) |
+| Windows | [Run in PowerShell](#windows) |
 
-- **Windows** — [Windows installation guide](docs/WINDOWS.md). Set up Python and
-  Ollama, then open `Start-AMY.cmd`.
-- **Linux desktop** — [Install AMY on Arch Linux and Hyprland](docs/LINUX_DESKTOP.md).
-- **Linux terminal** — [Linux installation and training guide](docs/START_HERE.md).
+Extract the ZIP to a folder you'll keep. Open a terminal in the folder
+containing this README.
 
-## Start AMY in a Linux terminal
+## Linux desktop
 
-Install Python 3.12 or later and Ollama. From this project folder, run the installer.
+1. On Arch Linux, install Python, uv, and Ollama if needed.
 
-```bash
-python amy_training.py install
-```
+   ```bash
+   sudo pacman -S --needed python uv ollama
+   ```
 
-Open one terminal for the Ollama server. Use the existing model directory if you
-already have an AMY setup.
+2. From the AMY folder, run the installer.
 
-```bash
-OLLAMA_NO_CLOUD=1 OLLAMA_HOST=127.0.0.1:11435 \
-  OLLAMA_CONTEXT_LENGTH=4096 \
-  OLLAMA_MODELS="$HOME/.local/share/jarvis-models" ollama serve
-```
+   ```bash
+   python install_amy_desktop.py
+   ```
 
-In a second terminal, download the default model and start AMY.
+3. Open **AMY** from your app launcher. Go to **Settings → Models** and select
+   a downloaded model.
+
+If the list is empty, leave AMY open, download the default model, and click
+**Refresh models**.
 
 ```bash
 OLLAMA_HOST=127.0.0.1:11435 ollama pull lfm3:1.7b
-python "$HOME/.local/share/mitan-jarvis/amy.py"
 ```
 
-For Qwen 3.5 4B, pull `qwen3.5:4b` on the same server and add
-`--model qwen3.5:4b` to the Python command.
+If your models are already in Ollama on port `11434`, run the installer with
+`--port 11434` to use that server. Use the same port for model downloads.
+For voice, screen translation, or troubleshooting, see the
+[Linux desktop guide](docs/LINUX_DESKTOP.md).
 
-## What you can do in the terminal
+## Linux terminal
 
-| Task | Example at the AMY prompt |
+You need **Python 3.12 or newer** and **Ollama**. [Ollama for Linux](https://ollama.com/download/linux)
+
+1. In **Terminal 1**, start Ollama and leave it running. If your AMY server is
+   already running on port `11435`, go to step 2.
+
+   ```bash
+   OLLAMA_NO_CLOUD=1 OLLAMA_HOST=127.0.0.1:11435 \
+     OLLAMA_CONTEXT_LENGTH=4096 \
+     OLLAMA_MODELS="$HOME/.local/share/jarvis-models" ollama serve
+   ```
+
+2. In **Terminal 2**, open the AMY folder. Download the default model once,
+   then start AMY.
+
+   ```bash
+   OLLAMA_HOST=127.0.0.1:11435 ollama pull lfm3:1.7b
+   python mitan_jarvis.py
+   ```
+
+For voice, Hyprland screen reading, or training, see the
+[Linux setup guide](docs/START_HERE.md).
+
+## Windows
+
+You need **64-bit Python 3.12** and **Ollama**. Open Ollama from the Start menu
+before running the commands below. [Python download](https://www.python.org/downloads/windows/) ·
+[Ollama download](https://ollama.com/download/windows)
+
+1. Open **PowerShell** in the AMY folder and run this setup once.
+
+   ```powershell
+   py -3.12 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements-windows.txt
+   ollama pull lfm3:1.7b
+   ```
+
+2. Start AMY.
+
+   ```powershell
+   .\Start-AMY.cmd
+   ```
+
+After setup, you can also double-click `Start-AMY.cmd` in File Explorer.
+For voice, screen reading, or troubleshooting, see the
+[Windows setup guide](docs/WINDOWS.md).
+
+## First things to try
+
+Enter one of these after AMY opens.
+
+| Try this | What happens |
 | --- | --- |
-| Read commands | `/help` |
-| Check the clock or do arithmetic | “What time is it?” or “What is 12 × 8?” |
-| Start a voice session | `/voice on` |
-| Read a Hyprland screen | `/screen 1 What does this error mean?` |
-| Create an HTML file | “Create me an HTML file that can surprise me.” |
-| Look up a saved project file | `/where .html` |
-| Turn off web lookups | `/web off` |
-| Check local training resources | `/train check` |
+| `What time is it?` | AMY checks your device clock. |
+| `Explain why a compass points north.` | AMY asks your local Ollama model. |
+| `Create a text file called hello.txt saying Hello.` | AMY previews the file. After you approve, it saves under your **Projects** folder and shows the verified path. |
 
-Project files go under `~/Projects/`. After approval and a successful write,
-AMY shows **Saved and verified** with the full path. Voice, screen reading,
-and LoRA training have optional setup steps.
-
-See the [Windows guide](docs/WINDOWS.md), [Linux setup and training guide](docs/START_HERE.md), [command reference](AMY_Commands.txt),
-and [validation notes](docs/VALIDATION.md). AMY stores profile data and saved
-notes locally. The installer preserves existing profiles and notes.
+In the terminal, type `/help` for commands or `/quit` to exit.
+See the [command reference](AMY_Commands.txt) and [validation notes](docs/VALIDATION.md).
 
 ## License
 
-[MIT](LICENSE). Model weights and downloaded dependencies are governed by their
-own licenses.
+[MIT](LICENSE). Models and dependencies have their own licenses.
