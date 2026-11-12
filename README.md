@@ -1,10 +1,16 @@
 # AMY-ai_companion
 
-AMY is a local AI companion for the Linux terminal. It uses Ollama for chat and
+AMY is a local AI companion for Windows and Linux terminals. It uses Ollama for chat and
 supports voice, local tools, screen reading, and project file creation with an
 approval preview.
 
-## Start AMY
+## Install AMY
+
+- **Windows** — [Windows installation guide](docs/WINDOWS.md). Set up Python and
+  Ollama, then open `Start-AMY.cmd`.
+- **Linux** — [Linux installation and training guide](docs/START_HERE.md).
+
+## Start AMY on Linux
 
 Install Python 3.12 or later and Ollama. From this project folder, run the installer.
 
@@ -48,7 +54,7 @@ Project files go under `~/Projects/`. After approval and a successful write,
 AMY shows **Saved and verified** with the full path. Voice, screen reading,
 and LoRA training have optional setup steps.
 
-See the [setup and training guide](docs/START_HERE.md), [command reference](AMY_Commands.txt),
+See the [Windows guide](docs/WINDOWS.md), [Linux setup and training guide](docs/START_HERE.md), [command reference](AMY_Commands.txt),
 and [validation notes](docs/VALIDATION.md). AMY stores profile data and saved
 notes locally. The installer preserves existing profiles and notes.
 

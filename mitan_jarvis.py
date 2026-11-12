@@ -8,7 +8,6 @@ import ctypes
 import csv
 import difflib
 import errno
-import fcntl
 import getpass
 import hashlib
 import html
@@ -39,17 +38,24 @@ from decimal import Decimal, InvalidOperation, localcontext
 from email.utils import parsedate_to_datetime
 from http.client import HTTPConnection, HTTPSConnection, HTTPException
 from io import StringIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory, TemporaryFile
 from time import monotonic, sleep
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 
+WINDOWS = sys.platform == "win32"
+if WINDOWS:
+    import amy_windows as windows
+else:
+    import fcntl
+
 MODEL = "lfm3:1.7b"
 CHAT_MODELS = (MODEL, "qwen3.5:4b", "qwen3.5:9b")
 DEFAULT_VISION_MODEL = "qwen3.5:4b"
+DEFAULT_OLLAMA_PORT = 11434 if WINDOWS else 11435
 SCREEN_FAST_SIDE = 1024
-DATA = Path.home() / ".local/share/mitan-jarvis"
+DATA = windows.data_directory() if WINDOWS else Path.home() / ".local/share/mitan-jarvis"
 PROJECTS_ROOT = Path.home() / "Projects"
 AMY_HOME = Path.home() / "AMY"
 MEMORY = DATA / "memory.txt"
@@ -62,7 +68,7 @@ SEED_PROFILE = {
 }
 LANGUAGES = {"en": "English (US)", "zh": "Mandarin (Traditional Chinese)"}
 WHISPER = DATA / "ggml-base.bin"
-KOKORO_PYTHON = DATA / "kokoro-env/bin/python"
+KOKORO_PYTHON = DATA / ("kokoro-env/Scripts/python.exe" if WINDOWS else "kokoro-env/bin/python")
 ASSETS = DATA / "kokoro-v1.1-zh"
 VOICES = {"en": "af_sol", "zh": "zf_090"}
 REPO = "hexgrad/Kokoro-82M-v1.1-zh"
@@ -101,7 +107,7 @@ HELP = """Type a question, or try one of these commands:
   /timezone Asia/Taipei Save a verified IANA timezone after approval.
   /voice or /voice on   Start ongoing voice chat with automatic pause detection.
   /voice off or /text   Stop voice chat and return to typing.
-  /screens              List the Hyprland displays and their screen numbers.
+  /screens              List the connected displays and their screen numbers.
   /screen [N] [ASK]     Check the focused or numbered display with fast settings.
   /screen detail [N] [ASK] Inspect a larger image for small text or fine detail.
   /screen text [N]     Read visible text with local OCR, without a chat model.
@@ -161,6 +167,8 @@ def confirm_change(description, risk="medium"):
     # A queued Enter used to finish recording is not approval for a later action.
     if VOICE_ACTIVE:
         check_voice_control()
+        if WINDOWS:
+            windows.clear_keyboard()
     print(f"\nProposed action [{risk} risk]: {description}")
     return ask_yes_no("Approve this action?")
 
@@ -231,6 +239,8 @@ def clock_zone():
     try:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, TypeError, ValueError) as error:
+        if WINDOWS and not available_timezones():
+            raise RuntimeError("Install requirements-windows.txt for Windows timezone data.") from error
         raise RuntimeError("Invalid timezone setting. Use /timezone Asia/Taipei to correct it.") from error
 
 
@@ -449,6 +459,8 @@ def training_directory():
 
 
 def active_training_run():
+    if WINDOWS:
+        return None
     path = training_directory() / "active.json"
     if path.is_symlink(): raise RuntimeError("Invalid training-selection symlink. Inspect it before continuing.")
     try: selection = json.loads(path.read_text(encoding="utf-8"))
@@ -543,6 +555,9 @@ def model_transport(port, timeout, *, model=MODEL):
 
 def training_command(question, port):
     global VOICE_ACTIVE
+    if WINDOWS:
+        print("The LoRA training worker uses Linux. Windows AMY uses your local Ollama model.")
+        return
     parts = question.casefold().split()
     if parts == ["/teach"]: arguments = ["teach"]
     else:
@@ -823,7 +838,16 @@ def hyprland_screens():
     return screens
 
 
+def connected_screens():
+    return windows.screens() if WINDOWS else hyprland_screens()
+
+
 def screen_capture(monitor, *, max_side=1920):
+    if WINDOWS:
+        image = windows.capture_screen(monitor, max_side)
+        if not 33 <= len(image) <= 16_000_000:
+            raise RuntimeError("Windows could not capture a usable image of that display.")
+        return image
     grim = shutil.which("grim")
     if not grim:
         raise RuntimeError("Screen checks need grim. On Arch, install it with sudo pacman -S --needed grim.")
@@ -849,6 +873,9 @@ def require_vision_model(port, model):
         connection.request("POST", "/api/show", json.dumps({"model": model}), {"Content-Type": "application/json"})
         with connection.getresponse() as response:
             if response.status == 404:
+                if WINDOWS:
+                    raise RuntimeError(f"Download the vision model first. In PowerShell, set "
+                                       f'$env:OLLAMA_HOST = "127.0.0.1:{port}", then run ollama pull {model}.')
                 raise RuntimeError(f"Download the vision model first: OLLAMA_HOST=127.0.0.1:{port} ollama pull {model}")
             if response.status != 200:
                 raise RuntimeError("Ollama couldn't check the vision model. Check your local Ollama server.")
@@ -942,6 +969,9 @@ def answer_screen(port, model, request, think, voice, language):
     use_ocr = mode == "text" or (mode == "fast" and screen_text_question(ask))
     ocr_tool = screen_ocr_tool(language, ask) if use_ocr else None
     if mode == "text" and ocr_tool is None:
+        if WINDOWS:
+            raise RuntimeError("Text-only screen reading needs Tesseract on PATH and the matching language data. "
+                               "See the Windows installation guide, or use /screen for local vision.")
         raise RuntimeError(
             "Text-only screen reading needs Tesseract and the matching language data. "
             "On Arch, use sudo pacman -S --needed tesseract tesseract-data-eng. "
@@ -1132,19 +1162,33 @@ def unquote_project_path(value):
     return value
 
 
+def absolute_project_path(value):
+    return bool(PureWindowsPath(value).anchor) if WINDOWS else value.startswith("/")
+
+
+def project_path_key(parts):
+    return tuple(part.casefold() for part in parts) if WINDOWS else parts
+
+
 def project_parts(value, scope):
     # Treat paths lexically, then open every real component without following links.
-    if value.startswith("/"):
+    if WINDOWS:
+        value = value.replace("\\", "/")
+    if absolute_project_path(value):
         prefix = str(PROJECTS_ROOT.joinpath(*scope)) + "/"
-        if not value.startswith(prefix):
+        if WINDOWS:
+            prefix = prefix.replace("\\", "/")
+        inside = value.casefold().startswith(prefix.casefold()) if WINDOWS else value.startswith(prefix)
+        if not inside:
             raise ValueError("Use a path inside " + str(PROJECTS_ROOT.joinpath(*scope)) + ".")
-        value = value.removeprefix(prefix)
+        value = value[len(prefix):]
     parts = tuple(value.split("/"))
     if len(parts) > 12:
         raise ValueError("That file path has too many directory levels.")
     for part in parts:
         lower = part.casefold()
         if (not PROJECT_COMPONENT.fullmatch(part) or part in {".", ".."} or lower in PROJECT_PRIVATE
+                or (WINDOWS and not windows.valid_component(part))
                 or (part.startswith(".") and lower not in PROJECT_DOTFILES)
                 or lower.endswith((".pem", ".key", ".p12", ".sqlite", ".sqlite3"))):
             raise ValueError(f"That path isn't an editable project path: {value!r}.")
@@ -1154,6 +1198,10 @@ def project_parts(value, scope):
 @contextmanager
 def home_directory(parts, *, parent=None, created=None):
     """Open an owned directory tree without following symlinks."""
+    if WINDOWS:
+        with windows.home_directory(parts, parent=parent, created=created) as directory:
+            yield directory
+        return
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory = os.dup(parent) if parent is not None else os.open(Path.home(), flags)
     walked = []
@@ -1182,11 +1230,23 @@ def home_directory(parts, *, parent=None, created=None):
 
 
 def path_exists(directory, name):
+    if WINDOWS:
+        return windows.path_exists(directory, name)
     try:
         os.stat(name, dir_fd=directory, follow_symlinks=False)
     except FileNotFoundError:
         return False
     return True
+
+
+def project_entry_info(directory, name):
+    if WINDOWS:
+        return windows.entry_info(directory, name)
+    return os.stat(name, dir_fd=directory, follow_symlinks=False)
+
+
+def project_entry_owned(info):
+    return WINDOWS or info.st_uid == os.getuid()
 
 
 def rename_project_entry(source_fd, source, target_fd, target, *, exchange=False):
@@ -1220,6 +1280,8 @@ def file_stamp(info):
 
 
 def read_owned_bytes(directory, name, limit):
+    if WINDOWS:
+        return windows.read_owned_bytes(directory, name, limit)
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     with os.fdopen(os.open(name, flags, dir_fd=directory), "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -1234,6 +1296,9 @@ def read_owned_bytes(directory, name, limit):
 
 
 def write_output_file(directory, name, data):
+    if WINDOWS:
+        windows.write_output_file(directory, name, data)
+        return
     staged = stage_bytes(directory, data, 0o600)
     try:
         rename_project_entry(directory, staged, directory, name)
@@ -1251,7 +1316,7 @@ def output_name(tag, extension):
 
 
 def find_screen(number):
-    screens = hyprland_screens()
+    screens = connected_screens()
     if number is None:
         focused = [n for n, monitor in screens.items() if monitor.get("focused") is True]
         if len(focused) != 1:
@@ -1282,7 +1347,7 @@ def save_screenshot(number):
         print("Screenshot cancelled.")
         return None
     _, current = find_screen(number)
-    if current["name"] != monitor["name"]:
+    if current["name"] != monitor["name"] or current.get("region") != monitor.get("region"):
         raise RuntimeError("The selected monitor changed after preview. Request the screenshot again.")
     image = screen_capture(current)
     with home_directory(("AMY", "screenshots"), created=[]) as directory:
@@ -1315,23 +1380,26 @@ def project_snapshot(directory, path):
 
 def project_inventory(directory, instruction):
     paths = []
-    for folder, children, names, fd in os.fwalk(".", dir_fd=directory, follow_symlinks=False):
-        relative = Path(folder).parts
-        children[:] = sorted(name for name in children if not name.startswith(".") and
-                             name.casefold() not in PROJECT_PRIVATE and len(relative) < 5)
-        for name in sorted(names):
-            path = (*relative, name)
-            try:
-                project_parts("/".join(path), ())
-                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            except (ValueError, FileNotFoundError):
-                continue
-            if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1 and info.st_size <= PROJECT_FILE_BYTES:
-                paths.append(path)
+    walker = windows.walk_directory(directory) if WINDOWS else os.fwalk(".", dir_fd=directory, follow_symlinks=False)
+    with closing(walker):
+        for folder, children, names, fd in walker:
+            relative = folder if WINDOWS else Path(folder).parts
+            children[:] = sorted(name for name in children if not name.startswith(".") and
+                                 name.casefold() not in PROJECT_PRIVATE and len(relative) < 5)
+            for name in sorted(names):
+                path = (*relative, name)
+                try:
+                    project_parts("/".join(path), ())
+                    info = project_entry_info(fd, name)
+                except (ValueError, FileNotFoundError, NotADirectoryError):
+                    continue
+                if (stat.S_ISREG(info.st_mode) and project_entry_owned(info) and info.st_nlink == 1
+                        and info.st_size <= PROJECT_FILE_BYTES):
+                    paths.append(path)
+                if len(paths) >= 240:
+                    break
             if len(paths) >= 240:
                 break
-        if len(paths) >= 240:
-            break
     instruction = instruction.casefold()
     words = set(re.findall(r"[\w-]{3,}", instruction))
     preferred = {"routes/web.php", "routes/api.php", "readme.md", "index.html", "main.py"}
@@ -1347,12 +1415,12 @@ def recent_project_paths(matches):
     try:
         with home_directory(("AMY", "dump")) as directory:
             reports = []
-            for name in os.listdir(directory):
+            for name in os.listdir(directory.path if WINDOWS else directory):
                 if not re.fullmatch(r"\d{8}-\d{6}-project-edit-[a-f0-9]{8}\.txt", name):
                     continue
                 try:
-                    info = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                except FileNotFoundError:
+                    info = project_entry_info(directory, name)
+                except (FileNotFoundError, NotADirectoryError):
                     continue
                 if stat.S_ISREG(info.st_mode):
                     reports.append((info.st_mtime_ns, name))
@@ -1382,10 +1450,10 @@ def project_file_exists(directory, path):
         return False
     try:
         with home_directory(path[:-1], parent=directory) as parent:
-            info = os.stat(path[-1], dir_fd=parent, follow_symlinks=False)
+            info = project_entry_info(parent, path[-1])
     except (FileNotFoundError, NotADirectoryError):
         return False
-    return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+    return stat.S_ISREG(info.st_mode) and project_entry_owned(info)
 
 
 def show_project_file_location(argument, voice, language):
@@ -1399,9 +1467,9 @@ def show_project_file_location(argument, voice, language):
         if extension:
             wanted = {".html", ".htm"} if selector.casefold() == ".html" else {selector.casefold()}
             return Path(path[-1]).suffix.casefold() in wanted
-        if selector.startswith("/"):
-            return path == parts
-        return not parts or path[-len(parts):] == parts
+        if absolute_project_path(selector):
+            return project_path_key(path) == project_path_key(parts)
+        return not parts or project_path_key(path[-len(parts):]) == project_path_key(parts)
 
     with ExitStack() as stack:
         try:
@@ -1504,14 +1572,17 @@ def validated_project_changes(plan, target, mode, snapshots, directory):
         raise RuntimeError("The model returned an invalid project plan.")
     changes = []
     seen = set()
+    snapshot_paths = {project_path_key(path): path for path in snapshots}
     for item in plan["files"]:
         if (not isinstance(item, dict) or set(item) != {"path", "edits"} or not isinstance(item["path"], str)
-                or item["path"].startswith("/") or not isinstance(item["edits"], list) or not 1 <= len(item["edits"]) <= 8):
+                or absolute_project_path(item["path"]) or not isinstance(item["edits"], list) or not 1 <= len(item["edits"]) <= 8):
             raise RuntimeError("The model returned an invalid file edit.")
         path = project_parts(item["path"], ())
-        if path in seen or (target and path != target):
+        key = project_path_key(path)
+        if key in seen or (target and key != project_path_key(target)):
             raise RuntimeError("The model proposed a duplicate or out-of-scope file.")
-        seen.add(path)
+        seen.add(key)
+        path = target or snapshot_paths.get(key, path)
         old, stamp = snapshots[path] if path in snapshots else project_snapshot(directory, path)
         if (mode == "create" and old is not None) or (mode == "edit" and old is None):
             raise RuntimeError("The requested create or edit doesn't match the file's current state.")
@@ -1566,6 +1637,8 @@ def describe_project_diff(changes):
 def scope_identity(directory):
     if directory is None:
         return None
+    if WINDOWS:
+        return directory.identity
     info = os.fstat(directory)
     return info.st_dev, info.st_ino
 
@@ -1586,18 +1659,85 @@ def missing_project_parents(directory, changes):
     return missing
 
 
+def check_project_state(directory, expected_scope, changes, expected_parents):
+    if expected_scope is not None and scope_identity(directory) != expected_scope:
+        raise RuntimeError("The project folder changed after preview. Review a new proposal.")
+    if any(project_snapshot(directory, change.path) != (change.old, change.stamp) for change in changes):
+        raise RuntimeError("A file changed after preview. Review a new proposal before writing.")
+    if missing_project_parents(directory, changes) != expected_parents:
+        raise RuntimeError("A destination directory changed after preview. Review a new proposal.")
+
+
+def project_report(scope, created):
+    details = "Verified project changes\n" + str(PROJECTS_ROOT.joinpath(*scope)) + "\n\n"
+    if created:
+        details += "Directories created\n" + "\n".join("/".join(p) for p in sorted(set(created))) + "\n\n"
+    return details
+
+
+def apply_windows_project_changes(scope, expected_scope, changes, report_name, preview, expected_parents):
+    with ExitStack() as stack:
+        root = stack.enter_context(home_directory(("Projects",), created=[] if expected_scope is None and not scope else None))
+        stack.enter_context(windows.project_lock(root))
+        directory = stack.enter_context(home_directory(scope, parent=root))
+        check_project_state(directory, expected_scope, changes, expected_parents)
+        report_dir = stack.enter_context(home_directory(("AMY", "dump"), created=[]))
+        created = []
+        prepared = []
+        attempted = []
+        with ExitStack() as files:
+            for number, change in enumerate(changes, 1):
+                parent = files.enter_context(home_directory(change.path[:-1], parent=directory, created=created))
+                if change.old is None:
+                    file = files.enter_context(windows.staged_file(parent, change.new))
+                    backup = None
+                else:
+                    file = files.enter_context(windows.lock_existing_file(parent, change.path[-1]))
+                    old, info = file.read(PROJECT_FILE_BYTES)
+                    if old != change.old or file_stamp(info) != change.stamp:
+                        raise RuntimeError("A file changed after preview. Review a new proposal before writing.")
+                    backup = f"{report_name.removesuffix('.txt')}-original-{number}.txt"
+                prepared.append((change, file, backup))
+            for change, _, backup in prepared:
+                if backup is not None:
+                    write_output_file(report_dir, backup, change.old)
+            try:
+                for change, file, backup in prepared:
+                    if backup is None:
+                        file.publish(change.path[-1])
+                        if file.read(PROJECT_FILE_BYTES)[0] != change.new:
+                            raise RuntimeError(f"Could not verify the new file: {file.path}")
+                    else:
+                        # Write through the same exclusive handle to preserve the file's ACL and streams.
+                        attempted.append((change, file, backup))
+                        file.write_verified(change.new)
+                details = project_report(scope, created)
+                backups = [f"{'/'.join(change.path)} -> {AMY_HOME / 'dump' / backup}"
+                           for change, _, backup in prepared if backup is not None]
+                if backups:
+                    details += "Original file backups\n" + "\n".join(backups) + "\n\n"
+                write_output_file(report_dir, report_name, (details + preview).encode("utf-8"))
+            except BaseException as error:
+                recovery = []
+                for change, file, backup in reversed(attempted):
+                    try:
+                        file.write_verified(change.old)
+                    except (OSError, RuntimeError):
+                        recovery.append(str(AMY_HOME / "dump" / backup))
+                if recovery:
+                    raise RuntimeError("AMY could not restore every edited file. Original backups: " + ", ".join(recovery)) from error
+                raise
+
+
 def apply_project_changes(scope, expected_scope, changes, report_name, preview, expected_parents):
+    if WINDOWS:
+        return apply_windows_project_changes(scope, expected_scope, changes, report_name, preview, expected_parents)
     # Lock the common root for competing AMY sessions and recheck the approved state.
     with ExitStack() as stack:
         root = stack.enter_context(home_directory(("Projects",), created=[] if expected_scope is None and not scope else None))
         fcntl.flock(root, fcntl.LOCK_EX | fcntl.LOCK_NB)
         directory = stack.enter_context(home_directory(scope, parent=root))
-        if expected_scope is not None and scope_identity(directory) != expected_scope:
-            raise RuntimeError("The project folder changed after preview. Review a new proposal.")
-        if any(project_snapshot(directory, change.path) != (change.old, change.stamp) for change in changes):
-            raise RuntimeError("A file changed after preview. Review a new proposal before writing.")
-        if missing_project_parents(directory, changes) != expected_parents:
-            raise RuntimeError("A destination directory changed after preview. Review a new proposal.")
+        check_project_state(directory, expected_scope, changes, expected_parents)
         report_dir = stack.enter_context(home_directory(("AMY", "dump"), created=[]))
         staged = []
         created = []
@@ -1623,9 +1763,7 @@ def apply_project_changes(scope, expected_scope, changes, report_name, preview, 
                 expected_mode = stat.S_IMODE(change.stamp[2]) if change.stamp else 0o644
                 if actual != change.new or stat.S_IMODE(info.st_mode) != expected_mode:
                     raise RuntimeError(f"Read-back verification failed for {'/'.join(change.path)}.")
-            details = "Verified project changes\n" + str(PROJECTS_ROOT.joinpath(*scope)) + "\n\n"
-            if created:
-                details += "Directories created\n" + "\n".join("/".join(p) for p in sorted(set(created))) + "\n\n"
+            details = project_report(scope, created)
             write_output_file(report_dir, report_name, (details + preview).encode("utf-8"))
         except BaseException as error:
             recovery = []
@@ -1713,6 +1851,8 @@ def edit_project_files(port, model, scope, target, instruction, mode, voice, lan
     report_name = output_name("project-edit", "txt")
     report = AMY_HOME / "dump" / report_name
     description = f"Apply the diff below in {PROJECTS_ROOT.joinpath(*scope)} and save a local change report to {report}.\n"
+    if WINDOWS and any(change.old is not None for change in changes):
+        description += f"Save verified copies of the original files beside the report in {report.parent}.\n"
     if identity is None:
         description += f"Create {PROJECTS_ROOT} if needed.\n"
     if parents:
@@ -1734,11 +1874,14 @@ def list_projects(active):
     try:
         with home_directory(("Projects",)) as directory:
             projects = []
-            for name in sorted(os.listdir(directory), key=str.casefold):
+            for name in sorted(os.listdir(directory.path if WINDOWS else directory), key=str.casefold):
                 if name.startswith(".") or not PROJECT_COMPONENT.fullmatch(name) or name.casefold() in PROJECT_PRIVATE:
                     continue
-                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
+                try:
+                    info = project_entry_info(directory, name)
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                if stat.S_ISDIR(info.st_mode) and project_entry_owned(info):
                     projects.append(name)
     except FileNotFoundError:
         projects = []
@@ -1871,6 +2014,9 @@ def write_laravel_env(directory):
 
 
 def create_laravel_project(name, voice, language):
+    if WINDOWS:
+        raise RuntimeError("AMY's Laravel scaffolder currently uses Linux. You can select and edit an existing "
+                           "Laravel project in your Windows Projects folder.")
     name = unquote_project_path(name)
     if not PROJECT_SLUG.fullmatch(name) or name.casefold() in PROJECT_PRIVATE | {"off"}:
         raise ValueError("Use a project name with letters, numbers, hyphens or underscores. Example: inventory-app.")
@@ -2017,6 +2163,8 @@ class VoiceControl(Exception):
 
 def poll_voice_keyboard():
     """Read one submitted terminal line without consuming the next line's bytes."""
+    if WINDOWS:
+        return windows.poll_keyboard()
     try:
         descriptor = sys.stdin.fileno()
     except (AttributeError, OSError, ValueError):
@@ -2047,6 +2195,10 @@ def check_voice_control():
 def stop_voice_process(process):
     if process.poll() is not None:
         return
+    if WINDOWS:
+        process.terminate()
+        process.wait(timeout=3)
+        return
     try:
         os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=3)
@@ -2066,7 +2218,7 @@ def run_voice_process(command, *, timeout=None, text=None, finish_with_enter=Fal
             incoming.seek(0)
         with subprocess.Popen(command, stdin=incoming if text is not None else subprocess.DEVNULL,
                               stdout=output, stderr=subprocess.STDOUT, cwd=DATA,
-                              env=speech_environment(), start_new_session=True) as process:
+                              env=speech_environment(), start_new_session=not WINDOWS) as process:
             started = monotonic()
             try:
                 while process.poll() is None:
@@ -2079,10 +2231,13 @@ def run_voice_process(command, *, timeout=None, text=None, finish_with_enter=Fal
                                 # Ignore Enter during worker import/startup; the worker announces readiness.
                                 ready = Path(command[-1]).with_suffix(".ready")
                                 if ready.is_file():
-                                    try:
-                                        os.kill(process.pid, signal.SIGUSR1)
-                                    except ProcessLookupError:
-                                        pass
+                                    if WINDOWS:
+                                        ready.with_suffix(".finish").touch()
+                                    else:
+                                        try:
+                                            os.kill(process.pid, signal.SIGUSR1)
+                                        except ProcessLookupError:
+                                            pass
                     if timeout is not None and monotonic() - started > timeout:
                         raise subprocess.TimeoutExpired(command, timeout)
                     sleep(0.05)
@@ -2121,21 +2276,14 @@ class SpeechSegment:
         return self.silent_frames >= self.pause_frames or len(self.frames) >= 1500
 
 
-def record_worker(output):
-    try:
-        import webrtcvad
-    except ImportError as error:
-        raise RuntimeError("Speech detector is missing. Run --setup once to add it.") from error
+def record_pipewire(destination, segment, vad):
     executable = shutil.which("pw-record")
     if not executable:
         raise RuntimeError("PipeWire pw-record is missing.")
     force_end = [False]
     signal.signal(signal.SIGUSR1, lambda *_: force_end.__setitem__(0, True))
-    segment = SpeechSegment()
-    vad = webrtcvad.Vad(2)
     frame_bytes = 960  # 30 ms, 16 kHz, mono, signed 16-bit PCM.
     pending = bytearray()
-    destination = Path(output)
     with TemporaryFile(dir=WORK_DIR) as errors:
         with subprocess.Popen([executable, "--raw", "--rate=16000", "--channels=1", "--format=s16", "-"],
                               stdout=subprocess.PIPE, stderr=errors) as recorder:
@@ -2172,6 +2320,20 @@ def record_worker(output):
                     except subprocess.TimeoutExpired:
                         recorder.kill()
                         recorder.wait(timeout=3)
+
+
+def record_worker(output):
+    try:
+        import webrtcvad
+    except ImportError as error:
+        raise RuntimeError("Speech detector is missing. Run --setup once to add it.") from error
+    segment = SpeechSegment()
+    vad = webrtcvad.Vad(2)
+    destination = Path(output)
+    if WINDOWS:
+        windows.record_microphone(destination, segment, vad)
+    else:
+        record_pipewire(destination, segment, vad)
     if not segment.active:
         return False
     with wave.open(str(destination), "wb") as audio:
@@ -2196,10 +2358,20 @@ def clean_voice_transcript(transcript):
     return speech if any(character.isalnum() for character in speech) else ""
 
 
+def whisper_executable():
+    if WINDOWS:
+        local = DATA / "whisper" / "whisper-cli.exe"
+        if local.is_file():
+            return str(local)
+    return shutil.which("whisper-cli")
+
+
 def listen(language="en"):
-    for executable in ("pw-record", "whisper-cli"):
-        if not shutil.which(executable):
-            raise RuntimeError(f"Required microphone tool is missing: {executable}")
+    whisper = whisper_executable()
+    if not whisper:
+        raise RuntimeError("Whisper CLI is missing. Follow the microphone steps in the installation guide.")
+    if not WINDOWS and not shutil.which("pw-record"):
+        raise RuntimeError("Required microphone tool is missing: pw-record")
     if not WHISPER.is_file():
         raise RuntimeError("Download the Whisper file in the voice setup step first.")
     if not KOKORO_PYTHON.is_file():
@@ -2221,7 +2393,7 @@ def listen(language="en"):
             raise RuntimeError("No audio was recorded. Check your mic and speak before pressing Enter.")
         print("Transcribing…", flush=True)
         result = run_voice_process([
-            "whisper-cli", "-m", str(WHISPER), "-f", str(recording), "-l", language,
+            whisper, "-m", str(WHISPER), "-f", str(recording), "-l", language,
             "-otxt", "-of", str(transcript), "-nt", "--no-gpu",
         ], timeout=90)
         if result.returncode or not transcript.with_suffix(".txt").is_file():
@@ -2241,6 +2413,8 @@ def speech_environment(offline=True):
         "TRANSFORMERS_OFFLINE": "1" if offline else "0",
         "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4",
     })
+    if WINDOWS:
+        environment.update({"TEMP": str(WORK_DIR), "TMP": str(WORK_DIR), "PYTHONUTF8": "1"})
     return environment
 
 
@@ -2248,6 +2422,15 @@ def check_audio(path):
     with wave.open(str(path), "rb") as audio:
         if audio.getnchannels() != 1 or audio.getnframes() < 2400:
             raise RuntimeError("Speech generation produced empty or invalid audio.")
+
+
+def audio_player(path):
+    if WINDOWS:
+        return [sys.executable, str(Path(__file__).resolve()), "--play-worker", str(path)]
+    player = shutil.which("pw-play")
+    if not player:
+        raise RuntimeError("PipeWire pw-play is missing.")
+    return [player, str(path)]
 
 
 def speak(answer, language="en"):
@@ -2267,15 +2450,14 @@ def speak(answer, language="en"):
         if result.returncode:
             raise RuntimeError(f"Kokoro speech failed (exit {result.returncode}):\n{result.stdout[-1800:]}")
         check_audio(audio)
-        player = shutil.which("pw-play")
-        if not player:
-            raise RuntimeError("PipeWire pw-play is missing; speech was generated but cannot be played.")
-        result = run_voice_process([player, str(audio)], timeout=180)
+        result = run_voice_process(audio_player(audio), timeout=180)
         if result.returncode:
             raise RuntimeError(f"Audio playback failed: {result.stdout[-800:]}")
 
 
 def switch_workspace():
+    if WINDOWS:
+        raise RuntimeError("That workspace shortcut is for Hyprland. Windows virtual desktops use Windows shortcuts.")
     executable = shutil.which("hyprctl")
     if not executable:
         raise RuntimeError("hyprctl is missing. This action requires your Hyprland session.")
@@ -2458,11 +2640,16 @@ class SpeechSession:
         self.log = TemporaryFile(dir=WORK_DIR)
         self.process = None
         self.thread = None
+        self.reader = None
+        self.messages = queue.SimpleQueue()
         try:
             self.process = subprocess.Popen(
                 [str(KOKORO_PYTHON), str(Path(__file__).resolve()), "--tts-server", str(ASSETS), str(self.directory)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True,
-                encoding="utf-8", bufsize=1, cwd=DATA, env=speech_environment(), start_new_session=True)
+                encoding="utf-8", bufsize=1, cwd=DATA, env=speech_environment(), start_new_session=not WINDOWS)
+            if WINDOWS:
+                self.reader = threading.Thread(target=self.read_windows_pipe, name="amy-speech-pipe", daemon=True)
+                self.reader.start()
             print("Loading Kokoro once for this voice session…", flush=True)
             message = self.read_message(120, keyboard=True)
             if not message.get("ready"):
@@ -2474,18 +2661,32 @@ class SpeechSession:
             self.close()
             raise
 
+    def read_windows_pipe(self):
+        try:
+            for line in self.process.stdout:
+                self.messages.put(line)
+        finally:
+            self.messages.put(None)
+
     def read_message(self, timeout, keyboard=False):
         deadline = monotonic() + timeout
         while monotonic() < deadline:
             if keyboard and VOICE_ACTIVE:
                 check_voice_control()
-            if select.select([self.process.stdout], [], [], 0.05)[0]:
+            if WINDOWS:
+                try:
+                    line = self.messages.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+            elif select.select([self.process.stdout], [], [], 0.05)[0]:
                 line = self.process.stdout.readline()
-                if line:
-                    return json.loads(line)
-                self.log.seek(0)
-                details = self.log.read().decode(errors="replace")[-1800:]
-                raise RuntimeError("Kokoro session stopped unexpectedly: " + details)
+            else:
+                continue
+            if line:
+                return json.loads(line)
+            self.log.seek(0)
+            details = self.log.read().decode(errors="replace")[-1800:]
+            raise RuntimeError("Kokoro session stopped unexpectedly: " + details)
         raise RuntimeError("Kokoro session timed out.")
 
     def submit(self, text, language):
@@ -2515,14 +2716,11 @@ class SpeechSession:
                 if not result.get("ok") or result.get("id") != counter:
                     raise RuntimeError(result.get("error", "Invalid speech response."))
                 check_audio(output)
-                player = shutil.which("pw-play")
-                if not player:
-                    raise RuntimeError("PipeWire pw-play is missing.")
                 with self.player_lock:
                     if self.closed:
                         return
-                    self.player = subprocess.Popen([player, str(output)], stdout=self.log, stderr=self.log,
-                                                   start_new_session=True)
+                    self.player = subprocess.Popen(audio_player(output), stdout=self.log, stderr=self.log,
+                                                   start_new_session=not WINDOWS)
                 try:
                     status = self.player.wait(timeout=180)
                     if status and not self.closed:
@@ -2566,6 +2764,8 @@ class SpeechSession:
             pass
         if self.thread is not None:
             self.thread.join(timeout=5)
+        if self.reader is not None:
+            self.reader.join(timeout=3)
         if self.process is not None:
             for stream in (self.process.stdin, self.process.stdout):
                 if stream is not None:
@@ -2579,6 +2779,8 @@ def close_speech_session():
     if SPEECH_SESSION is not None:
         SPEECH_SESSION.close()
         SPEECH_SESSION = None
+    if WINDOWS:
+        windows.clear_keyboard()
 
 
 # Conservative default: only these reference, documentation, government and news sources.
@@ -3097,6 +3299,8 @@ def news_evidence(query):
 
 
 def read_search_key():
+    if WINDOWS:
+        return None
     if SEARCH_KEY.is_symlink():
         raise RuntimeError("Refusing a symlink for the search API key.")
     try:
@@ -3112,6 +3316,8 @@ def read_search_key():
 
 
 def configure_search_key(remove=False):
+    if WINDOWS:
+        raise RuntimeError("Paid Brave API-key storage is available in the Linux build. Use /search with regular providers on Windows.")
     if remove:
         if not SEARCH_KEY.exists() and not SEARCH_KEY.is_symlink():
             print("No search API key is saved.")
@@ -3350,6 +3556,7 @@ def sensitive_search_query(query):
     patterns = (r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", r"\b(?:sk-|ghp_|github_pat_|hf_|AKIA)[A-Za-z0-9_-]{10,}",
                 r"\b(?:password|passport|credit card|bank account|api key|birthday|born|date of birth|weight|height|MBTI|phone number|home address)\b|身分證|護照|密碼|生日|體重|身高",
                 r"(?:/home/|/etc/|file://|https?://(?:localhost|127\.|192\.168\.|10\.))",
+                r"\b[A-Z]:[\\/]|\\\\[^\s\\]+\\|%(?:USERPROFILE|LOCALAPPDATA|APPDATA)%",
                 r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b", r"\b\+?\d[\d ()-]{8,}\d\b",
                 r"\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b")
     if any(re.search(pattern, query, re.I) for pattern in patterns):
@@ -3471,19 +3678,23 @@ def remove_piper():
 
 
 def setup():
-    uv = shutil.which("uv")
-    if not uv:
+    uv = None if WINDOWS else shutil.which("uv")
+    if not WINDOWS and not uv:
         raise RuntimeError("uv is missing. Install it with sudo pacman -S --needed uv, then run --setup again.")
     if not DATA.resolve().is_relative_to(Path.home().resolve()):
         raise RuntimeError("The data folder resolves outside your home. Inspect the path before setup.")
     print(f"AMY setup target: {DATA}")
-    print("Installs Python 3.12, CPU-only PyTorch, Kokoro and English/Mandarin support under your home.")
+    print("Installs CPU-only PyTorch, Kokoro and English/Mandarin support under your home.")
     print("Adds automatic approved-source web search and a voice worker that stays loaded in voice mode.")
     print("Adds local time/date/calculation tools and direct current-data sources; these do not retrain the language model.")
     print("Downloads the official model and the two selected voices. Setup uses the network; speech runs offline afterward.")
-    print("Creates a default local profile if absent; updates AMY settings and the installed app copy.")
+    print("Creates a default local profile if absent and updates AMY settings.")
+    if not WINDOWS:
+        print("Updates the installed AMY copy.")
     print(json.dumps(SEED_PROFILE, ensure_ascii=False, indent=2))
-    if not confirm_change("Install/update AMY and its speech dependencies, model, profile and settings in the folder shown above."):
+    description = ("Install or update the speech and web dependencies, model, profile and settings in the folder shown above."
+                   if WINDOWS else "Install/update AMY and its speech dependencies, model, profile and settings in the folder shown above.")
+    if not confirm_change(description):
         print("Setup cancelled.")
         return
     DATA.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -3491,28 +3702,33 @@ def setup():
     environment = speech_environment(offline=False)
     environment.update({"UV_CACHE_DIR": str(DATA / "uv-cache"),
                         "UV_PYTHON_INSTALL_DIR": str(DATA / "python")})
-    def install(arguments):
-        subprocess.run([uv, *arguments], check=True, env=environment, cwd=DATA)
     if not KOKORO_PYTHON.is_file():
-        install(["venv", "--python", "3.12", str(KOKORO_PYTHON.parent.parent)])
-    install(["pip", "install", "--python", str(KOKORO_PYTHON), "torch==2.10.0",
-             "--index-url", "https://download.pytorch.org/whl/cpu"])
-    install(["pip", "install", "--python", str(KOKORO_PYTHON), "kokoro==0.9.4",
-             "misaki[en,zh]==0.9.4", "transformers==4.57.6", "spacy>=3.8,<3.9", "soundfile", "numpy<3",
-             "webrtcvad-wheels==2.0.14",
-             "ddgs==9.16.1", "trafilatura==2.3.1", "defusedxml==0.7.1",
-             "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"])
+        venv = [sys.executable, "-m", "venv"] if WINDOWS else [uv, "venv", "--python", "3.12"]
+        subprocess.run([*venv, str(KOKORO_PYTHON.parent.parent)], check=True, env=environment, cwd=DATA)
+    installer = ([str(KOKORO_PYTHON), "-m", "pip", "install"] if WINDOWS
+                 else [uv, "pip", "install", "--python", str(KOKORO_PYTHON)])
+    subprocess.run([*installer, "torch==2.10.0", "--index-url", "https://download.pytorch.org/whl/cpu"],
+                   check=True, env=environment, cwd=DATA)
+    dependencies = [
+        "kokoro==0.9.4", "misaki[en,zh]==0.9.4", "transformers==4.57.6", "spacy>=3.8,<3.9", "soundfile", "numpy<3",
+        "webrtcvad-wheels==2.0.14", "ddgs==9.16.1", "trafilatura==2.3.1", "defusedxml==0.7.1",
+        "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    ]
+    if WINDOWS:
+        dependencies.append("sounddevice>=0.5,<0.6")
+    subprocess.run([*installer, *dependencies], check=True, env=environment, cwd=DATA)
     subprocess.run([str(KOKORO_PYTHON), "-c",
                     "import kokoro, misaki, soundfile, torch, spacy, webrtcvad, ddgs, trafilatura, defusedxml; "
                     "assert torch.__version__.startswith('2.10.0'); "
-                    "assert torch.version.cuda is None; assert spacy.util.is_package('en_core_web_sm')"],
+                    "assert torch.version.cuda is None; assert spacy.util.is_package('en_core_web_sm')"
+                    + ("; import sounddevice" if WINDOWS else "")],
                    check=True, env=environment, cwd=DATA)
     download_assets()
     # Preserve earlier copies before updating settings and the installed program.
     from datetime import datetime
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    installed = DATA / "amy.py"
     source = Path(__file__).resolve()
+    installed = source if WINDOWS else DATA / "amy.py"
     for path in (SETTINGS, installed):
         if path.is_file() and path != source:
             backup = path.with_name(path.name + f".{stamp}.bak")
@@ -3530,13 +3746,25 @@ def setup():
     if load_language() != "en" or not installed.is_file():
         raise RuntimeError("Setup verification failed. Check the reported paths.")
     print(f"\nAMY installed. Start with: python \"{installed}\"")
-    print("Next, run this program with --remove-piper. It tests both voices before offering cleanup.")
+    if WINDOWS:
+        print("Double-click Start-AMY.cmd in your project folder. See the Windows guide for Whisper microphone setup.")
+    else:
+        print("Next, run this program with --remove-piper. It tests both voices before offering cleanup.")
+
+
+def terminal_help():
+    if not WINDOWS:
+        return HELP
+    linux_commands = ("/laravel", "/train", "/teach", "/search-key", "Switch to workspace")
+    return "\n".join(line.replace("focused or numbered", "primary or numbered")
+                     for line in HELP.splitlines() if not line.strip().startswith(linux_commands))
 
 
 def main():
     global VOICE_ACTIVE, SPEECH_SESSION, WEB_ENABLED, ASSETS, WORK_DIR
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=11435, help="local Ollama port (default 11435)")
+    parser.add_argument("--port", type=int, default=DEFAULT_OLLAMA_PORT,
+                        help=f"local Ollama port (default {DEFAULT_OLLAMA_PORT})")
     parser.add_argument("--model", choices=CHAT_MODELS, default=MODEL, help="local chat model for this session")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--setup", action="store_true", help="approve installation and voice downloads once")
@@ -3544,6 +3772,7 @@ def main():
     action.add_argument("--remove-piper", action="store_true", help="test Kokoro, then approve removal of the old Piper voices")
     action.add_argument("--tts-worker", nargs=2, metavar=("LANG", "OUTPUT"), help=argparse.SUPPRESS)
     action.add_argument("--record-worker", metavar="OUTPUT", help=argparse.SUPPRESS)
+    action.add_argument("--play-worker", metavar="AUDIO", help=argparse.SUPPRESS)
     action.add_argument("--tts-server", nargs=2, metavar=("ASSETS", "TEMP"), help=argparse.SUPPRESS)
     action.add_argument("--web-worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -3560,6 +3789,13 @@ def main():
         os.environ.update(speech_environment())
         if not record_worker(args.record_worker):
             sys.exit(4)
+        return
+    if args.play_worker:
+        if not WINDOWS:
+            parser.error("The WAV playback worker uses Windows.")
+        import winsound
+        check_audio(args.play_worker)
+        winsound.PlaySound(args.play_worker, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
         return
     if args.tts_server:
         ASSETS, WORK_DIR = map(Path, args.tts_server)
@@ -3581,13 +3817,15 @@ def main():
             print("Voice test was not confirmed.")
         return
     if args.remove_piper:
+        if WINDOWS:
+            parser.error("Piper cleanup applies to the older Linux AMY installation.")
         remove_piper()
         return
 
     history = deque(maxlen=6)
     think_next = False
     VOICE_ACTIVE = False
-    WEB_ENABLED = True
+    WEB_ENABLED = not WINDOWS
     pending_command = None
     pending_weather_query = None
     pending_verification = None
@@ -3595,12 +3833,12 @@ def main():
     active_project = ()
     language = load_language()
     print(f"Mitan's AMY | Fast mode | {args.model} | Ollama on 127.0.0.1:{args.port}")
-    if args.model != MODEL:
+    if args.model != MODEL and not WINDOWS:
         print("Using the selected Ollama model for chat. LFM3 training applies when you launch without --model.")
     print(f"Reply and microphone language: {LANGUAGES[language]}")
     print("AMY | Project files enabled | /projects to list folders | /web for search status.")
     print("Local clock timezone: " + str(language_settings().get("timezone", "Asia/Taipei")))
-    print(HELP)
+    print(terminal_help())
     while True:
         try:
             voice = VOICE_ACTIVE
@@ -3656,7 +3894,7 @@ def main():
             if question == "/quit":
                 break
             if question == "/help":
-                print(HELP)
+                print(terminal_help())
                 continue
             request = project_request(question, active_project)
             if pending_laravel_name:
@@ -3704,7 +3942,7 @@ def main():
             if show_screens or screen is not None:
                 try:
                     if show_screens:
-                        screens = hyprland_screens()
+                        screens = connected_screens()
                         lines = [
                             f"Screen {number}: {monitor['name']}" + (" (focused)" if monitor.get("focused") is True else "")
                             for number, monitor in sorted(screens.items())
@@ -3764,7 +4002,10 @@ def main():
                     print("Only public HTTPS text pages on approved domains are read; no scripts, login, files or private-network URLs.")
                     print("Domain approval reduces risk but does not certify accuracy or guarantee a site is harmless.")
                     print("Direct tools: Open-Meteo weather; BBC/CNA headlines; daily reference exchange rates; public crypto prices.")
-                    print("General search: your configured official API, or free providers which may fail or be rate-limited.")
+                    if WINDOWS:
+                        print("General search uses free providers, which may fail or be rate-limited.")
+                    else:
+                        print("General search: your configured official API, or free providers which may fail or be rate-limited.")
                     print("Local clock and calculator work with web OFF and never use the language model.")
                 if voice:
                     status_reply = ("已啟用核准來源的線上搜尋。" if WEB_ENABLED else "已關閉線上搜尋。") if language == "zh" else (

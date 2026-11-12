@@ -838,6 +838,8 @@ The training budget is 30 GiB with monitored limits.
 
 def main():
     global ROOT
+    if sys.platform == "win32":
+        raise RuntimeError("The training helper uses Linux. For Windows AMY setup, open docs/WINDOWS.md.")
     ROOT = training_directory()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", default="help", choices=["help", "install", "check", "status", "setup", "init", "teach", "pilot", "train", "review", "use", "base", "_worker", "_serve"])

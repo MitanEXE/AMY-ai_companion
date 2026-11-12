@@ -1,5 +1,18 @@
 # What was tested
 
+## Windows port
+
+Run `python -m unittest discover -s tests -v` from the project folder. The
+GitHub workflow runs this suite on Windows and Linux with Python 3.12.
+The suite uses a local Ollama fixture and a temporary user profile. It checks
+chat, the clock, approved memory, file creation, cancellation, edits, save
+lookup, hard-link rejection, and recovery when a report write fails.
+
+The Linux run passed the cross-platform cases. Windows package resolution was
+checked for Python 3.12 x64. The native Windows filesystem cases and a live
+Windows microphone, display, and Ollama session require a Windows test host.
+The [installation guide](WINDOWS.md) has the steps for those device checks.
+
 These results come from the development test environment.
 
 ## Real training test

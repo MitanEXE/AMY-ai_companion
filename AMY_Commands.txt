@@ -1,7 +1,14 @@
 AMY COMMAND REFERENCE
 =====================
 
-START AMY (run these in your Linux terminals)
+START AMY ON WINDOWS
+
+Follow docs/WINDOWS.md, then double-click Start-AMY.cmd. In PowerShell,
+use .\Start-AMY.cmd --model qwen3.5:4b to select a downloaded model.
+Windows uses Ollama on 127.0.0.1:11434 by default.
+Type /help in AMY for the commands available on Windows.
+
+START AMY ON LINUX (run these in your Linux terminals)
 
 Terminal A — start the local Ollama server and leave the terminal open:
 

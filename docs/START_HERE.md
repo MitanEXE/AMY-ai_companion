@@ -1,5 +1,8 @@
 # AMY: local training starter
 
+This guide is for Linux. For the Windows app and launcher, see the
+[Windows installation guide](WINDOWS.md).
+
 This adds real LoRA training to AMY. You review teaching examples, run a small training job, inspect its results, and decide whether to try the trained model. Your original Ollama model stays available.
 
 AMY handles everyday chat, commands, time and arithmetic locally. It goes online for recognized live requests, such as weather, news and exchange rates, or when you explicitly ask. For an uncommon phrasing, say “look up” followed by the topic or use `/search TOPIC`. If AMY offers to verify a basic explanation, say “yes, check” or “no”. The offer expires after three minutes or when you change topics. `/web off` disables online lookups.
