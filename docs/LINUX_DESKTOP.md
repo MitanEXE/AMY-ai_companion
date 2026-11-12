@@ -72,15 +72,7 @@ After a local model reply, click **Reply timing** to see the time to first text,
 - Attachment excerpts include filenames and page or line numbers. Follow-ups can refer to the most recent attachments in that chat. AMY keeps the original file references locally and asks you to reattach a file if it changed or moved.
 - If AMY offers a choice card, select a choice and click **Submit choice**. You can send a follow-up in the message box while the card is open.
 
-## Create images locally
-
-For text-to-image, start a local [ComfyUI server](https://docs.comfy.org/installation/manual_install) on `127.0.0.1:8188`. Put a compatible single-file Stable Diffusion checkpoint in its `models/checkpoints/` folder.
-
-1. In a chat, type an image description and click **Create image**, or send `/image your description`.
-2. Choose a locally installed `.safetensors` checkpoint. AMY requests one 512 × 512 preview and displays it in the chat.
-3. Click **Save image** and confirm to keep the PNG in `~/AMY/dump/`. Open **Saved media** to find it later. Unsaved previews are kept for the current session.
-
-ComfyUI handles the render on your device. When you stop waiting in AMY, a render already running may finish in ComfyUI. Ollama continues to handle chat and image understanding.
+Image generation is unavailable in this Linux build. Open **Saved media** to find previously saved images.
 
 ## Work on a coding project
 

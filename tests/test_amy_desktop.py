@@ -20,7 +20,7 @@ if HAS_QT:
     from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QTimer, Qt
     from PySide6.QtGui import QImage
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QCheckBox, QDialogButtonBox, QPushButton
+    from PySide6.QtWidgets import QApplication, QCheckBox, QDialogButtonBox, QLabel, QPushButton
 
     import amy_desktop as app
     import amy_desktop_core as desktop
@@ -53,18 +53,6 @@ class OllamaFixture(BaseHTTPRequestHandler):
             self.send_data({"version": "fixture"})
         elif self.path == "/api/tags":
             self.send_data({"models": self.server.models})
-        elif self.path == "/models/checkpoints":
-            self.send_data(["fixture.safetensors", "legacy.ckpt"])
-        elif self.path == "/history/amy-image-test":
-            self.send_data({"amy-image-test": {"outputs": {"7": {"images": [
-                {"filename": "fixture.png", "subfolder": "", "type": "temp"},
-            ]}}}})
-        elif self.path.startswith("/view?"):
-            self.send_response(200)
-            self.send_header("Content-Type", "image/png")
-            self.send_header("Content-Length", str(len(self.server.image)))
-            self.end_headers()
-            self.wfile.write(self.server.image)
         else:
             self.send_error(404)
 
@@ -73,10 +61,6 @@ class OllamaFixture(BaseHTTPRequestHandler):
         if self.path == "/api/show":
             self.server.metadata.append(self.path)
             self.send_data({"capabilities": ["completion", "vision"]})
-            return
-        if self.path == "/prompt":
-            self.server.image_prompts.append(request)
-            self.send_data({"prompt_id": "amy-image-test"})
             return
         if self.path != "/api/chat":
             self.send_error(404)
@@ -134,14 +118,13 @@ class DesktopTests(unittest.TestCase):
         self.server.options = OPTIONS
         self.server.draft = None
         self.server.answer = "A local reply."
-        self.server.image_prompts = []
-        self.server.image = self.image_bytes(0xFF8844CC)
         self.server.models = [
             {"name": "lfm3:1.7b", "digest": "a" * 64},
             {"name": "someuser/custom:latest", "digest": "b" * 64, "capabilities": ["completion", "vision"]},
             {"name": "remote:cloud"},
             {"name": "remote:alias", "remote_host": "example.com"},
             {"name": "embeddings:latest", "capabilities": ["embedding"]},
+            {"name": "image-only:latest", "capabilities": ["image"]},
         ]
         self.server.finish_reason = "stop"
         self.server.stall = False
@@ -534,27 +517,30 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("short paragraphs", request["messages"][0]["content"])
         self.assertEqual(desktop.load_preferences().style, style)
 
-    def test_generated_images_display_and_save_with_approval(self):
-        self.window.image_generator = app.ComfyUI(self.server.server_port)
-        with patch.object(app.QInputDialog, "getItem", return_value=("fixture.safetensors", True)):
-            self.window.begin_image_generation("A violet mountain")
-            self.wait_for(lambda: bool(self.window.generated_images))
-        workflow = self.server.image_prompts[0]["prompt"]
-        self.assertEqual(workflow["2"]["inputs"]["text"], "A violet mountain")
-        self.assertEqual(workflow["7"]["class_type"], "PreviewImage")
+    def test_legacy_image_command_stays_local(self):
+        metadata = list(self.server.metadata)
+        self.send("/IMAGE A violet mountain")
+        self.assertIn("Image generation is unavailable", self.window.transcript.toPlainText())
+        self.assertIsNone(self.window.job)
         self.assertEqual(self.server.requests, [])
-        control, = [item for item in self.window.transcript.findChildren(QPushButton) if item.text() == "Save image"]
-        with patch.object(self.window, "confirm", return_value=False):
-            control.click()
-        self.assertFalse(list((self.home / "AMY/dump").glob("*.png")))
-        with patch.object(self.window, "confirm", return_value=True):
-            control.click()
-        saved, = list((self.home / "AMY/dump").glob("*.png"))
-        self.assertFalse(QImage(str(saved)).isNull())
-        self.assertEqual(control.text(), "Image saved")
-        chat = ChatStore()
-        chat.load()
-        self.assertEqual(chat.chats[chat.active].messages[-1]["image_file"]["path"], str(saved))
+        self.assertEqual(self.server.metadata, metadata)
+        self.assertNotIn("Create image", {item.text() for item in self.window.findChildren(QPushButton)})
+
+    def test_previously_saved_images_reopen_in_chat(self):
+        saved = self.home / "AMY/dump/generated-image.png"
+        saved.parent.mkdir(parents=True)
+        data = self.image_bytes(0xFF8844CC)
+        saved.write_bytes(data)
+        self.window.message("AMY", "Generated with a previous version.")
+        self.window.normal_chat.messages[-1]["image_file"] = files.Attachment.select(saved).record()
+        self.window.save_chats()
+
+        restored = app.AMYWindow(self.server.server_port, desktop.Preferences(), self.app.font(), load_models=False)
+        self.addCleanup(restored.close)
+        preview, = [item for item in restored.transcript.findChildren(QLabel)
+                    if item.accessibleName() == "Saved image"]
+        self.assertFalse(preview.pixmap().isNull())
+        self.assertEqual(saved.read_bytes(), data)
 
     def test_search_preview_and_opt_in_automatic_search(self):
         evidence = {"direct_answers": {"en": "It is 20 degrees in Taipei."}, "sources": [{

@@ -23,13 +23,16 @@ from PySide6.QtWidgets import (
 
 import amy_desktop_core as desktop
 import amy_desktop_files as files
-from amy_desktop_images import ComfyUI
 from amy_desktop_sessions import ChatStore, ChoiceStream, Conversation, CHOICE_HINT, CODING_SCHEMA, validate_choices
 import mitan_jarvis as amy
 from amy_desktop_views import ChatTranscript, DraftDialog, MediaView, MemoryView, ScanPanel, SettingsView, button, label, readonly, row
 
 GUIDE = Path(__file__).resolve().parent / "docs" / "LINUX_DESKTOP.md"
 IDLE = "Ready"
+IMAGE_HINT = (
+    "You can analyze supported image inputs. If asked to generate a picture, briefly explain "
+    "that image generation is unavailable in this build."
+)
 DARK = dict(base="#111827", nav="#141d2c", surface="#1e293b", border="#3a475f", text="#f5f3ff",
             muted="#b5bfd3", accent="#a78bfa", activity="#67e8f9", on_accent="#171229",
             hover="#31284b", user="#2c344b", danger="#ffacaa")
@@ -170,8 +173,6 @@ class AMYWindow(QMainWindow):
         self.workspace = None
         self.queued_attachments = []
         self.attachment_reader = files.AttachmentReader()
-        self.image_generator = ComfyUI()
-        self.generated_images = {}
         self.choice_card = self.pending_choice = None
         self.stream_label = None
         self.reply_timing = {}
@@ -364,8 +365,6 @@ class AMYWindow(QMainWindow):
         controls = QHBoxLayout()
         self.attach = button("Attach", self.choose_attachments)
         controls.addWidget(self.attach)
-        self.create_image_button = button("Create image", self.create_image)
-        controls.addWidget(self.create_image_button)
         self.voice = button("Voice on", self.toggle_voice)
         self.think = QCheckBox("Think")
         self.think.setToolTip("Ask the selected local model to think more before it replies.")
@@ -496,7 +495,6 @@ class AMYWindow(QMainWindow):
         if (menu.exec(self.chat_list.viewport().mapToGlobal(position)) is delete
                 and self.confirm("Delete chat", f"Delete “{chat.title}” from chat history?", "Delete chat")):
             del self.chats.chats[chat.id]
-            self.generated_images = {key: data for key, data in self.generated_images.items() if key[0] != chat.id}
             if chat is self.normal_chat:
                 self.normal_chat = next((item for item in self.chats.chats.values() if not item.workspace), None) or self.chats.new()
                 self.chats.active = self.normal_chat.id
@@ -522,16 +520,18 @@ class AMYWindow(QMainWindow):
         self.queued_attachments.clear()
         self.update_attachments()
         self.workspace_bar.setVisible(self.coding_mode)
-        self.create_image_button.setVisible(not self.coding_mode)
         self.timing_button.hide()
         self.reply_timing = {}
-        for index, item in enumerate(self.conversation.messages):
+        for item in self.conversation.messages:
             message, card = self.transcript.add_message(item["role"], item["text"], item["attachments"], item["choices"])
             if card:
                 card.retire()
-            key = (self.conversation.id, index)
-            if key in self.generated_images or item.get("image_file"):
-                self.render_generated_image(message, key, item)
+            if item.get("image_file"):
+                try:
+                    data = files.Attachment.from_record(item["image_file"]).read()
+                    self.transcript.add_image(message, data)
+                except (OSError, ValueError):
+                    message.setText(message.text() + "\nThe saved image is unavailable.")
         if not self.conversation.messages:
             if self.coding_mode:
                 text = ("Ask about the project or describe a change." if self.workspace
@@ -592,7 +592,7 @@ class AMYWindow(QMainWindow):
         self.stop.setEnabled(can_stop)
         self.send.setEnabled(False)
         for widget in (self.new_chat_button, self.chat_list, self.coding_button, self.choose_folder,
-                       self.browse_files, self.release_folder, self.attach, self.create_image_button):
+                       self.browse_files, self.release_folder, self.attach):
             widget.setEnabled(False)
         self.settings.refresh_button.setEnabled(False)
         self.settings.model_scroll.setEnabled(False)
@@ -627,7 +627,7 @@ class AMYWindow(QMainWindow):
         self.stop.hide()
         self.send.setEnabled(True)
         for widget in (self.new_chat_button, self.chat_list, self.coding_button, self.choose_folder,
-                       self.attach, self.create_image_button):
+                       self.attach):
             widget.setEnabled(True)
         self.update_workspace_bar()
         self.settings.refresh_button.setEnabled(True)
@@ -648,8 +648,6 @@ class AMYWindow(QMainWindow):
                 self.scan.status.setText("Stopped.")
             if kind == "draft":
                 self.message("AMY", "Draft canceled. No files were saved.")
-            if kind == "image":
-                self.set_status("Stopped waiting for ComfyUI. A running render may finish there.")
         elif error is not None:
             self.voice_on = False
             self.voice.setText("Voice on")
@@ -794,7 +792,13 @@ class AMYWindow(QMainWindow):
         self.retire_choices()
         self.message("Heard" if voice else "You", question, attachments)
         try:
-            if self.coding_mode:
+            if re.match(r"^/image(?:\s|$)", question, re.I):
+                self.clear_verification()
+                self.pending_weather = ""
+                text = ("這個 Linux 版本目前無法生成圖片。" if self.preferences.language == "zh"
+                        else "Image generation is unavailable in this Linux build.")
+                self.deliver_local(text, voice)
+            elif self.coding_mode:
                 self.coding_reply(question)
             elif attachments:
                 self.clear_verification()
@@ -825,10 +829,7 @@ class AMYWindow(QMainWindow):
         if command == "/help":
             self.deliver_local("Use Settings to pick a model, Memory to manage notes and Screen tools to scan an area. "
                                "Say “Create a complete HTML page” or use /file PATH REQUEST. "
-                               "Try /screen 1, /screenshot 1, /image PROMPT, /where, /search TOPIC or /remember NOTE.", voice)
-            return
-        if command == "/image":
-            self.begin_image_generation(argument.strip(), record=False)
+                               "Try /screen 1, /screenshot 1, /where, /search TOPIC or /remember NOTE.", voice)
             return
         if command in ("/memories", "/forget", "/profile"):
             self.open_page(1)
@@ -989,83 +990,6 @@ class AMYWindow(QMainWindow):
             self.preview_attachment(files.Attachment.from_record(record))
         except ValueError as error:
             self.report_error(error)
-
-    def create_image(self):
-        if self.job is not None or self.coding_mode:
-            return
-        prompt = self.composer.toPlainText().strip()
-        if not prompt:
-            prompt, accepted = QInputDialog.getMultiLineText(self, "Create image", "Describe the image")
-            if not accepted:
-                return
-        self.begin_image_generation(prompt.strip())
-
-    def begin_image_generation(self, prompt, *, record=True):
-        if not 1 <= len(prompt) <= 1600:
-            self.message("AMY", "Describe the image in 1 to 1,600 characters.")
-            return
-
-        def choose(checkpoints):
-            if not checkpoints:
-                self.message("AMY", "Add a compatible Stable Diffusion safetensors checkpoint to ComfyUI.")
-                return
-            model, accepted = QInputDialog.getItem(self, "Create image", "Local ComfyUI checkpoint",
-                                                   checkpoints, 0, False)
-            if not accepted:
-                return
-            if record:
-                self.retire_choices()
-                self.message("You", prompt)
-                if self.composer.toPlainText().strip() == prompt:
-                    self.composer.clear()
-            self.start_job("image", lambda token, status, _: self.image_generator.generate(prompt, model, token, status),
-                           lambda data: self.show_generated_image(data, model), initial="Starting local image generation…")
-
-        self.start_job("image models", lambda token, *_: self.image_generator.checkpoints(token), choose,
-                       initial="Checking local ComfyUI checkpoints…")
-
-    def show_generated_image(self, data, model):
-        chat = self.conversation
-        message, _ = self.message("AMY", f"Generated with {model}.")
-        key = (chat.id, len(chat.messages) - 1)
-        if len(self.generated_images) >= 8:
-            self.generated_images.pop(next(iter(self.generated_images)))
-        self.generated_images[key] = data
-        self.render_generated_image(message, key, chat.messages[-1])
-        self.set_status("Image ready.")
-
-    def render_generated_image(self, message, key, item):
-        if item.get("image_file"):
-            try:
-                data = files.Attachment.from_record(item["image_file"]).read()
-                self.transcript.add_image(message, data)
-            except (OSError, ValueError):
-                message.setText(message.text() + "\nThe saved image is unavailable.")
-        elif key in self.generated_images:
-            self.transcript.add_image(message, self.generated_images[key],
-                                      lambda control: self.save_generated_image(key, item, control))
-
-    def save_generated_image(self, key, item, control):
-        data = self.generated_images.get(key)
-        if self.job is not None or data is None:
-            return
-        name = amy.output_name("generated-image", "png")
-        path = amy.AMY_HOME / "dump" / name
-        if not self.confirm("Save generated image", f"Save this image to\n\n{path}", "Save image"):
-            return
-        try:
-            with amy.home_directory(("AMY", "dump"), created=[]) as directory:
-                amy.write_output_file(directory, name, data)
-            item["image_file"] = files.Attachment.select(path).record()
-        except (OSError, RuntimeError, ValueError) as error:
-            self.report_error(error)
-            return
-        self.generated_images.pop(key, None)
-        self.save_chats()
-        self.refresh_media()
-        control.setText("Image saved")
-        control.setEnabled(False)
-        self.set_status(f"Saved and verified · {path}")
 
     def open_coding(self):
         if self.job is not None:
@@ -1505,7 +1429,8 @@ class AMYWindow(QMainWindow):
                 screen_image=image if not text else None, screen_text=amy.screen_text_excerpt(text, 3000) if text else None,
                 screen_detail=bool(screen_request and screen_request[-1] == "detail"),
                 cancel=token, quiet=True, on_limit=warning.append, use_training=False,
-                attachment_context=references, attachment_images=images, response_hints=CHOICE_HINT if stream else "",
+                attachment_context=references, attachment_images=images,
+                response_hints=f"{IMAGE_HINT}\n{CHOICE_HINT}" if stream else "",
                 reply_timing=timing, max_reply_tokens=320 if preferences.style in ("Concise", "Short, Simple, and Listed")
                 and not use_think else None,
             )

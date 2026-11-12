@@ -170,20 +170,15 @@ class ChatTranscript(QScrollArea):
         self.scroll_to_end()
         return card
 
-    def add_image(self, message, data, save=None):
+    def add_image(self, message, data):
         picture = QPixmap()
         if not picture.loadFromData(data):
             return
         view = label()
-        view.setAccessibleName("Generated image")
+        view.setAccessibleName("Saved image")
         view.setPixmap(picture.scaled(QSize(420, 340), Qt.AspectRatioMode.KeepAspectRatio,
                                       Qt.TransformationMode.SmoothTransformation))
-        layout = message.parentWidget().layout()
-        layout.addWidget(view)
-        if save:
-            control = button("Save image")
-            control.clicked.connect(lambda: save(control))
-            layout.addLayout(row(control))
+        message.parentWidget().layout().addWidget(view)
         self.scroll_to_end()
 
 
