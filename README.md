@@ -1,16 +1,17 @@
 # AMY-ai_companion
 
-AMY is a local AI companion for Windows and Linux terminals. It uses Ollama for chat and
-supports voice, local tools, screen reading, and project file creation with an
-approval preview.
+AMY is a local AI companion with a desktop app for Linux and a terminal interface.
+It uses Ollama for chat, with optional voice, screen reading, and project file creation
+with an approval preview.
 
 ## Install AMY
 
 - **Windows** — [Windows installation guide](docs/WINDOWS.md). Set up Python and
   Ollama, then open `Start-AMY.cmd`.
-- **Linux** — [Linux installation and training guide](docs/START_HERE.md).
+- **Linux desktop** — [Install AMY on Arch Linux and Hyprland](docs/LINUX_DESKTOP.md).
+- **Linux terminal** — [Linux installation and training guide](docs/START_HERE.md).
 
-## Start AMY on Linux
+## Start AMY in a Linux terminal
 
 Install Python 3.12 or later and Ollama. From this project folder, run the installer.
 
@@ -37,7 +38,7 @@ python "$HOME/.local/share/mitan-jarvis/amy.py"
 For Qwen 3.5 4B, pull `qwen3.5:4b` on the same server and add
 `--model qwen3.5:4b` to the Python command.
 
-## What you can do
+## What you can do in the terminal
 
 | Task | Example at the AMY prompt |
 | --- | --- |
