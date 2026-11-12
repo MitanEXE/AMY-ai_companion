@@ -11,6 +11,8 @@ venv/
 # Local AMY data and generated output
 profile.json
 settings.json
+desktop-settings.json
+desktop-chats.json
 memory.txt
 brave-search.key
 training-install.json

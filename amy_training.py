@@ -129,11 +129,12 @@ def approve(description):
         print("Use yes/y/Enter to approve, or no/n to cancel.")
 
 
-def safe_root():
-    if not APP_DATA.resolve().is_relative_to(Path.home().resolve()) or ROOT.is_symlink():
+def safe_root(root=None):
+    root = ROOT if root is None else root
+    if not root.resolve().is_relative_to(Path.home().resolve()) or root.is_symlink():
         raise RuntimeError("Training folder must be a real folder under your home. Inspect its path first.")
     for name in ("env", "hf", "tmp", "runs", "cache", "uv-cache", "python", "source"):
-        path = ROOT / name
+        path = root / name
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             raise RuntimeError("Inspect this training subfolder before continuing: " + str(path))
 
@@ -176,9 +177,10 @@ def memory_info():
     return result
 
 
-def check_space(reserve=0):
-    parent = ROOT if ROOT.exists() else APP_DATA if APP_DATA.exists() else Path.home()
-    used, free = tree_bytes(ROOT), shutil.disk_usage(parent).free
+def check_space(reserve=0, root=None):
+    root = ROOT if root is None else root
+    parent = root if root.exists() else APP_DATA if APP_DATA.exists() else Path.home()
+    used, free = tree_bytes(root), shutil.disk_usage(parent).free
     if used + reserve > STORAGE_LIMIT: raise RuntimeError("Training would exceed its 30 GiB budget. Review existing runs before adding data.")
     if free < MIN_FREE_DISK + reserve: raise RuntimeError("Not enough free home-disk space. Keep at least 8 GiB free after this step.")
     return used, free
@@ -285,25 +287,49 @@ def teach():
     context = input("Optional reference context (Enter leaves blank): ").strip()
     language = input("Answer language en/zh [en]: ").strip().casefold() or "en"
     record = example_record((language, question, answer, context), "user")
-    records = read_json(ROOT / "approved-examples.json", [])
-    key = " ".join(question.casefold().split())
-    matching = [index for index, item in enumerate(records) if " ".join(item["question"].casefold().split()) == key]
+
+    def review(description):
+        print(description)
+        return approve("Save this reviewed correction to the local training dataset and back up the previous dataset?")
+
+    if save_teaching_example(record, review, root=ROOT):
+        print("Correction saved and checked.")
+
+
+def save_teaching_example(record, confirm, *, root):
+    safe_root(root)
+    path = root / "approved-examples.json"
+    records = read_json(path, [])
+    if records:
+        validate_examples(records)
+    key = " ".join(record["question"].casefold().split())
     updated = records[:]
-    if matching:
-        print("Previous example:\n" + json.dumps(records[matching[0]], ensure_ascii=False, indent=2))
-        updated[matching[0]] = record
-    else: updated.append(record)
+    index = next((i for i, item in enumerate(records) if " ".join(item["question"].casefold().split()) == key), None)
+    preview = f"Save this lesson to {path}. AMY will use it in a future training run.\n\n"
+    if index is None:
+        updated.append(record)
+    else:
+        preview += "Previous example\n" + json.dumps(records[index], ensure_ascii=False, indent=2) + "\n\n"
+        updated[index] = record
     validate_examples(updated)
-    eval_records = read_json(ROOT / "evaluation.json", [])
+    evaluation = root / "evaluation.json"
+    eval_records = read_json(evaluation, [])
     if any(" ".join(item["question"].casefold().split()) == key for item in eval_records):
         raise RuntimeError("Keep this evaluation question out of the training examples.")
-    print(json.dumps(record, ensure_ascii=False, indent=2))
-    if approve("Save exactly this user-approved correction to the local training dataset, replacing the previous version of this question if shown. Back up the previous dataset. It will not be uploaded or treated as an independently verified fact."):
-        check_space(1024 * 1024)
-        previous = ROOT / "approved-examples.json"
-        if previous.is_file(): shutil.copy2(previous, previous.with_name("examples." + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".bak"))
-        write_json(previous, updated)
-        validate_examples(read_json(ROOT / "approved-examples.json")); print("Correction saved and checked.")
+    preview += "Proposed example\n" + json.dumps(record, ensure_ascii=False, indent=2)
+    if not confirm(preview):
+        return False
+    safe_root(root)
+    if read_json(path, []) != records or read_json(evaluation, []) != eval_records:
+        raise RuntimeError("The dataset changed while you were reviewing it. Review the lesson again.")
+    check_space(1024 * 1024, root)
+    if path.is_file():
+        backup = path.with_name("examples." + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".bak")
+        shutil.copy2(path, backup)
+    write_json(path, updated)
+    if validate_examples(read_json(path)) != updated:
+        raise RuntimeError("The new example could not be verified on disk.")
+    return True
 
 
 def preflight():

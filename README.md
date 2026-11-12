@@ -5,11 +5,44 @@ and previews project file changes for you to approve.
 
 | Your setup | Start here |
 | --- | --- |
-| Linux | [Run in a terminal](#linux) |
+| Linux desktop | [Install the app on Arch Linux](#linux-desktop) |
+| Linux terminal | [Run in a terminal](#linux) |
 | Windows | [Run in PowerShell](#windows) |
 
 Get the project from GitHub using **Code → Download ZIP**. Extract it and open
 a terminal in the folder containing this README.
+
+## Linux desktop
+
+1. On Arch Linux, install Python, uv, and Ollama if needed.
+
+   ```bash
+   sudo pacman -S --needed python uv ollama
+   ```
+
+2. From the AMY folder, run the installer.
+
+   ```bash
+   python install_amy_desktop.py
+   ```
+
+3. Open **AMY Companion** from your app launcher. Go to **Settings → Models** and select
+   a downloaded model.
+
+If the list is empty, leave AMY open, download the default model, and click
+**Refresh models**.
+
+```bash
+OLLAMA_HOST=127.0.0.1:11435 ollama pull lfm3:1.7b
+```
+
+If your models are already in Ollama on port `11434`, run the installer with
+`--port 11434` to use that server. Use the same port for model downloads.
+For voice, screen translation, or troubleshooting, see the
+[Linux desktop guide](docs/LINUX_DESKTOP.md).
+
+Use **New chat** for a separate conversation, **Attach** to read local files,
+and **Coding** to choose a project folder and review proposed code changes.
 
 ## Linux
 
